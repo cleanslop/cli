@@ -1,7 +1,16 @@
 {
   "name": "cleanslop",
   "description": "CleanSlop readiness scans via remote MCP. Approve once, then scan from your agent.",
-  "version": "0.1.1",
+  "version": "0.1.2",
+  "author": {
+    "name": "CleanSlop",
+    "url": "https://cleanslop.com"
+  },
+  "homepage": "https://cleanslop.com/agents",
+  "repository": "https://github.com/cleanslop/cli",
+  "license": "MIT",
+  "icon": ".claude-plugin/icon.png",
+  "privacyPolicyUrl": "https://cleanslop.com/privacy",
   "mcpServers": {
     "cleanslop": {
       "type": "http",

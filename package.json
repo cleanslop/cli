@@ -2,6 +2,16 @@
   "name": "@cleanslop/cli",
   "version": "0.1.0",
   "description": "CleanSlop CLI — readiness scans from your coding agent",
+  "keywords": [
+    "code-review",
+    "coding-agent",
+    "mcp",
+    "vibe-coding",
+    "production-readiness",
+    "cleanslop",
+    "clean-slop",
+    "slop"
+  ],
   "homepage": "https://cleanslop.com/agents",
   "repository": {
     "type": "git",

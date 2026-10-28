@@ -97,7 +97,7 @@ node dist/index.js scan
 
 `test/` uses `node:test` and c8 against a fake HTTP server. The coverage floor is 90% for lines, statements and functions, and 80% for branches. `npm test` also checks that the tree names no upstream-only hosts or paths (`scripts/check-public.mjs`).
 
-This repository is a read-only mirror of the CLI's upstream source; see [CONTRIBUTING.md](./CONTRIBUTING.md) for how pull requests land. Each sync to `main` stages the next patch release (`scripts/release-version.mjs`) with npm provenance, and a maintainer approves it under Staged Packages on npmjs.com. Do not `npm publish` by hand.
+This repository is a read-only mirror of the CLI's upstream source; see [CONTRIBUTING.md](./CONTRIBUTING.md) for how pull requests land. Each sync to `main` stages the next patch release (`scripts/release-version.mjs`) with npm provenance, and a maintainer approves it under Staged Packages on npmjs.com, then publishes the GitHub release drafted from [CHANGELOG.md](./CHANGELOG.md). Do not `npm publish` by hand.
 
 ## License
 

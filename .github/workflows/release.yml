@@ -4,6 +4,8 @@ name: Release
 # main. The version is the next patch after the highest stable on npm, or
 # package.json's version when that is higher (scripts/release-version.mjs).
 # Nothing is committed back. npm attaches provenance through trusted publishing.
+# Then drafts the GitHub release from CHANGELOG.md; a maintainer publishes it,
+# which creates the tag, after approving the version on npm.
 on:
   push:
     branches: [main]
@@ -24,6 +26,8 @@ jobs:
       contents: read
       # npm trusted publishing (OIDC). No npm token is stored in the repo.
       id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -45,10 +49,12 @@ jobs:
             }
           ' "$(npm --version)"
       - name: Stamp the release version
+        id: version
         run: |
           version=$(node scripts/release-version.mjs release)
           npm version "$version" --no-git-tag-version --allow-same-version
           sed -i "s/^export const PACKAGE_VERSION = .*/export const PACKAGE_VERSION = \"${version}\";/" src/config.ts
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Publishing @cleanslop/cli@${version} as latest" >> "$GITHUB_STEP_SUMMARY"
       - run: npm ci
       # Includes the PACKAGE_NAME / PACKAGE_VERSION drift test and the
@@ -64,3 +70,44 @@ jobs:
       # The trusted publisher is stage-only: this queues the version, and a
       # maintainer approves it (2FA) under Staged Packages on npmjs.com.
       - run: npm stage publish --tag latest --access public
+
+  # Separate from `publish` so the job that runs npm code never holds a write
+  # token. Drafts stay private; publishing one creates the tag at the commit
+  # that was built (the one npm's provenance names).
+  draft-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+      - name: Draft v${{ needs.publish.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          tag="v${VERSION}"
+          # A version rejected on npm is staged again with the same number;
+          # keep its draft (the releases API lists drafts, tags/{tag} does not).
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${tag}\") | .html_url")
+          if [ -n "$existing" ]; then
+            echo "Release ${tag} already exists, left as is: ${existing}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          notes="$RUNNER_TEMP/notes.md"
+          node scripts/release-notes.mjs "$VERSION" > "$notes"
+          if [ ! -s "$notes" ]; then
+            echo "::warning title=No changelog entry::CHANGELOG.md has no '## ${VERSION}' section; the draft has only the npm link."
+            echo "_No CHANGELOG.md entry for ${VERSION}._" > "$notes"
+          fi
+          printf '\nnpm: https://www.npmjs.com/package/@cleanslop/cli/v/%s\n' "$VERSION" >> "$notes"
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft \
+            --target "$GITHUB_SHA" --title "$tag" --notes-file "$notes"
+          echo "Drafted ${tag}. Publish it after approving ${VERSION} on npmjs.com; delete it if you reject the version." >> "$GITHUB_STEP_SUMMARY"
