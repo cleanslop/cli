@@ -1,0 +1,42 @@
+{
+  "name": "@cleanslop/cli",
+  "version": "0.1.0",
+  "description": "CleanSlop CLI — readiness scans from your coding agent",
+  "homepage": "https://cleanslop.com/agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cleanslop/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cleanslop/cli/issues"
+  },
+  "type": "module",
+  "bin": {
+    "cleanslop": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "c8 --config c8.config.json node --import tsx --test --test-reporter spec 'test/**/*.test.ts'",
+    "plugin:skill": "tsx scripts/render-plugin-skill.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "c8": "^12.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

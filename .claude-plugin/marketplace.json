@@ -1,0 +1,14 @@
+{
+  "name": "cleanslop",
+  "description": "CleanSlop readiness scans for Claude Code",
+  "owner": {
+    "name": "CleanSlop"
+  },
+  "plugins": [
+    {
+      "name": "cleanslop",
+      "source": "./plugin",
+      "description": "CleanSlop readiness scans via remote MCP. Approve once, then scan from your agent."
+    }
+  ]
+}

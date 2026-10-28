@@ -1,0 +1,66 @@
+name: Release
+
+# Stages @cleanslop/cli for `latest` (approve on npmjs.com) on every push to
+# main. The version is the next patch after the highest stable on npm, or
+# package.json's version when that is higher (scripts/release-version.mjs).
+# Nothing is committed back. npm attaches provenance through trusted publishing.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # npm trusted publishing (OIDC). No npm token is stored in the repo.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+      # `npm stage` needs npm 11.15.0+, newer than the npm bundled with Node.
+      # Stay on 11: a later major may drop the Node 22 this job runs on.
+      - name: Install npm with staged publishing
+        run: npm install -g npm@11
+      - name: Require npm with staged publishing (11.15.0+)
+        run: |
+          node -e '
+            const [a, b] = process.argv[1].split(".").map(Number);
+            if (a < 11 || (a === 11 && b < 15)) {
+              console.error(`npm ${process.argv[1]} is too old for npm stage`);
+              process.exit(1);
+            }
+          ' "$(npm --version)"
+      - name: Stamp the release version
+        run: |
+          version=$(node scripts/release-version.mjs release)
+          npm version "$version" --no-git-tag-version --allow-same-version
+          sed -i "s/^export const PACKAGE_VERSION = .*/export const PACKAGE_VERSION = \"${version}\";/" src/config.ts
+          echo "Publishing @cleanslop/cli@${version} as latest" >> "$GITHUB_STEP_SUMMARY"
+      - run: npm ci
+      # Includes the PACKAGE_NAME / PACKAGE_VERSION drift test and the
+      # check-public scan.
+      - run: npm test
+      - run: npm run build
+      - name: Refuse to publish deploy hostnames
+        run: |
+          if grep -RIlE "h[c]to|prototype[.]cleanslop|staging" dist assets README.md package.json; then
+            echo "The files above name a non-production deploy; the package must stay origin-neutral." >&2
+            exit 1
+          fi
+      # The trusted publisher is stage-only: this queues the version, and a
+      # maintainer approves it (2FA) under Staged Packages on npmjs.com.
+      - run: npm stage publish --tag latest --access public

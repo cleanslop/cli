@@ -1,0 +1,11 @@
+{
+  "name": "cleanslop",
+  "description": "CleanSlop readiness scans via remote MCP. Approve once, then scan from your agent.",
+  "version": "0.1.1",
+  "mcpServers": {
+    "cleanslop": {
+      "type": "http",
+      "url": "https://cleanslop.com/mcp"
+    }
+  }
+}
