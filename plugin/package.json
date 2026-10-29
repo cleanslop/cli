@@ -2,6 +2,6 @@
   "name": "@cleanslop/claude-plugin",
   "version": "0.1.0",
   "private": true,
-  "description": "CleanSlop Claude Code plugin — skill plus remote MCP",
+  "description": "CleanSlop Claude Code plugin: a skill, the remote MCP server and the open-source CLI",
   "license": "MIT"
 }

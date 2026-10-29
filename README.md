@@ -1,5 +1,9 @@
 # CleanSlop CLI
 
+[![npm](https://img.shields.io/npm/v/@cleanslop/cli)](https://www.npmjs.com/package/@cleanslop/cli)
+[![license](https://img.shields.io/npm/l/@cleanslop/cli)](LICENSE)
+[![node](https://img.shields.io/node/v/@cleanslop/cli)](package.json)
+
 Readiness scans from your coding agent. The CLI starts a [CleanSlop](https://cleanslop.com) scan of your repo, waits for it, and hands the report back so the agent can fix what it finds. Published as `@cleanslop/cli` (bin `cleanslop`).
 
 - Setup guide and FAQ: <https://cleanslop.com/agents>

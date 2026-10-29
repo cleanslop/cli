@@ -4,6 +4,14 @@
 release workflow drafts the GitHub release from the section for the version it
 stages; a version with no section gets a draft with only the npm link. -->
 
+## 0.1.6
+
+- Claude Code plugin 0.1.3: adds a README describing what the plugin runs and sends, and a description that covers the skill, the MCP server and the CLI, ahead of listing it in Anthropic's plugin directory.
+- Plugin README: Stripe Link sign-ins upload the working tree on every scan without asking (only GitHub sign-ins ask first), what an upload leaves out, and that GitHub accounts buy on cleanslop.com while Link accounts approve in Link.
+- Marketplace description matches the plugin's.
+- README: npm version, license and Node version badges.
+- No changes to the CLI itself.
+
 ## 0.1.5
 
 - Claude Code plugin 0.1.2: adds an icon, author details and a privacy policy link. Existing installs pick it up with `claude plugin update cleanslop@cleanslop`.

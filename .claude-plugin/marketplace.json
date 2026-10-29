@@ -1,6 +1,6 @@
 {
   "name": "cleanslop",
-  "description": "CleanSlop readiness scans for Claude Code",
+  "description": "Readiness scans from Claude Code. A skill scans your repo at milestones and before PRs, reads the report and fixes what it finds, using CleanSlop's remote MCP server or its open-source CLI.",
   "owner": {
     "name": "CleanSlop"
   },
@@ -8,7 +8,7 @@
     {
       "name": "cleanslop",
       "source": "./plugin",
-      "description": "CleanSlop readiness scans via remote MCP. Approve once, then scan from your agent."
+      "description": "Readiness scans from Claude Code. A skill scans your repo at milestones and before PRs, reads the report and fixes what it finds, using CleanSlop's remote MCP server or its open-source CLI."
     }
   ]
 }
