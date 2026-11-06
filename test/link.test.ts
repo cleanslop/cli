@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 import { credentialsPath, storeToken } from "../src/credentials.js";
-import { isLinkSpendRequestNotFound, linkScopeTokens } from "../src/link.js";
-import { LINK_CLI_NPX_TIMEOUT_MS, LINK_CLI_PACKAGE } from "../src/config.js";
+import {
+  isLinkSpendRequestNotFound,
+  linkCliSearchPath,
+  linkCliVersionAtLeast,
+  linkScopeTokens,
+  parseLinkCliVersion,
+} from "../src/link.js";
+import { LINK_CLI_MIN_VERSION, LINK_CLI_NPX_TIMEOUT_MS, LINK_CLI_PACKAGE } from "../src/config.js";
 import type { CliDeps } from "../src/deps.js";
 import { ensureLinkAuth, runLinkCli } from "../src/link.js";
 import { runCli } from "../src/main.js";
@@ -325,6 +331,19 @@ test("login --link starts Link sign-in when link-cli is not authenticated", asyn
   assert.match(err, /https:\/\/app\.link\.com\/device\/setup\?code=test/);
   assert.match(err, /Code: apple-banana-cherry/);
   assert.equal(readLinkState(statePath).logins, 1);
+  // link-cli 1.1+ login would otherwise also ask for balances and transactions.
+  const loginArgs = (readLinkState(statePath) as unknown as { lastLoginArgs: string[] }).lastLoginArgs;
+  assert.deepEqual(loginArgs, [
+    "auth",
+    "login",
+    "--client-name",
+    "CleanSlop",
+    "--scope",
+    "userinfo:read",
+    "--no-financial-insights",
+    "--format",
+    "json",
+  ]);
   assert.equal(fake.state.linkStarts.length, 1);
   noSecrets(cap.out() + err);
 });
@@ -396,9 +415,15 @@ test("login --link adds the sign-in scope to a payment-only Link session", async
     deps
   );
   assert.equal(code, 0, cap.err());
-  const state = readLinkState(statePath) as unknown as { upgrades: number; lastScope: string };
+  const state = readLinkState(statePath) as unknown as {
+    upgrades: number;
+    lastScope: string;
+    lastUpgradeArgs: string[];
+  };
   assert.equal(state.upgrades, 1);
   assert.equal(state.lastScope, "userinfo:read");
+  // `auth upgrade` rejects --no-financial-insights and keeps the session's own access.
+  assert.equal(state.lastUpgradeArgs.includes("--no-financial-insights"), false);
   const err = cap.err();
   assert.match(err, /https:\/\/app\.link\.com\/device\/setup\?code=upgrade/);
   assert.match(err, /approve CleanSlop in Link\./);
@@ -1017,9 +1042,14 @@ type ExecCall = {
   args: string[];
   timeout: number | undefined;
   skipSkill: string | undefined;
+  cwd: string | undefined;
+  path: string | undefined;
 };
 
-function recordingExec(missing: string[]): {
+function recordingExec(
+  missing: string[],
+  versions: Record<string, string> = {}
+): {
   calls: ExecCall[];
   execFile: CliDeps["execFile"];
 } {
@@ -1030,9 +1060,17 @@ function recordingExec(missing: string[]): {
       args: [...args],
       timeout: opts?.timeout,
       skipSkill: opts?.env?.LINK_CLI_SKIP_SKILL_INSTALL,
+      cwd: opts?.cwd,
+      path: opts?.env?.PATH,
     });
     if (missing.includes(file)) {
       return { ok: false, stdout: "", stderr: `spawn ${file} ENOENT`, code: 127 };
+    }
+    if (args.length === 1 && args[0] === "--version") {
+      const version = versions[file] ?? "1.2.0";
+      return version
+        ? { ok: true, stdout: `${version}\n`, stderr: "", code: 0 }
+        : { ok: false, stdout: "", stderr: "Unknown flag: --version", code: 1 };
     }
     return {
       ok: true,
@@ -1054,10 +1092,165 @@ test("runLinkCli uses link-cli on PATH and does not probe again", async () => {
   await runLinkCli(deps, ["auth", "status"]);
   await runLinkCli(deps, ["auth", "status"]);
   assert.deepEqual(
-    rec.calls.map((call) => call.file),
-    ["link-cli", "link-cli"]
+    rec.calls.map((call) => [call.file, call.args.join(" ")]),
+    [
+      ["link-cli", "--version"],
+      ["link-cli", "auth status"],
+      ["link-cli", "auth status"],
+    ]
   );
-  assert.equal(rec.calls[0]!.skipSkill, "1");
+  assert.equal(rec.calls[1]!.skipSkill, "1");
+});
+
+test("runLinkCli uses the pinned npx link-cli when PATH has one older than the minimum", async () => {
+  for (const version of ["1.1.0", "0.29.0", "link-cli dev", ""]) {
+    const rec = recordingExec([], { "link-cli": version });
+    const { deps } = makeDeps({
+      origin: "https://app.example",
+      home: tempHome(),
+      execFile: rec.execFile,
+    });
+    await runLinkCli(deps, ["auth", "status"]);
+    assert.deepEqual(
+      rec.calls.map((call) => call.file),
+      ["link-cli", "npx"],
+      version
+    );
+  }
+});
+
+test("link-cli versions compare by major, minor and patch", () => {
+  assert.equal(LINK_CLI_MIN_VERSION, "1.2.0");
+  assert.deepEqual(parseLinkCliVersion("link-cli/1.2.10 darwin"), { core: [1, 2, 10], prerelease: false });
+  assert.deepEqual(parseLinkCliVersion("1.3.0-beta.2"), { core: [1, 3, 0], prerelease: true });
+  assert.equal(parseLinkCliVersion("dev"), null);
+  // A prerelease sorts below its release.
+  assert.equal(linkCliVersionAtLeast("1.2.0-beta.1"), false);
+  assert.equal(linkCliVersionAtLeast("1.2.1-beta.1"), true);
+  assert.equal(linkCliVersionAtLeast("1.2.0-rc.1", "1.2.0-beta.1"), true);
+  assert.equal(linkCliVersionAtLeast("1.2.0"), true);
+  assert.equal(linkCliVersionAtLeast("1.10.0"), true);
+  assert.equal(linkCliVersionAtLeast("2.0.0"), true);
+  assert.equal(linkCliVersionAtLeast("1.1.9"), false);
+  assert.equal(linkCliVersionAtLeast("0.30.0"), false);
+  assert.equal(linkCliVersionAtLeast("dev"), false);
+  assert.equal(linkCliVersionAtLeast("1.2.0", "bad"), false);
+  // The npx pin must itself satisfy the minimum.
+  assert.equal(linkCliVersionAtLeast(LINK_CLI_PACKAGE.split("@").pop()!), true);
+});
+
+test("link-cli runs from the config folder with the repo's node_modules/.bin off PATH", async () => {
+  const home = tempHome();
+  const repo = join(home, "code", "app");
+  mkdirSync(join(repo, "web"), { recursive: true });
+  const rec = recordingExec([]);
+  const { deps } = makeDeps({
+    origin: "https://app.example",
+    home,
+    cwd: join(repo, "web"),
+    execFile: rec.execFile,
+    git: async (args) =>
+      args.join(" ") === "rev-parse --show-toplevel"
+        ? { ok: true, stdout: `${repo}\n`, stderr: "", code: 0 }
+        : { ok: false, stdout: "", stderr: "", code: 1 },
+    envExtra: {
+      PATH: [
+        join(repo, "web", "node_modules", ".bin"),
+        join(repo, "node_modules", ".bin"),
+        join(home, "node_modules", ".bin"),
+        join(home, ".npm", "_npx", "abc", "node_modules", ".bin"),
+        "node_modules/.bin",
+        "",
+        "/usr/local/bin",
+        "/usr/bin",
+      ].join(":"),
+    },
+  });
+  await runLinkCli(deps, ["auth", "status"]);
+  for (const call of rec.calls) {
+    assert.equal(call.cwd, join(home, ".config", "cleanslop"));
+    assert.equal(
+      call.path,
+      [join(home, ".npm", "_npx", "abc", "node_modules", ".bin"), "/usr/local/bin", "/usr/bin"].join(":")
+    );
+  }
+  assert.equal(existsSync(join(home, ".config", "cleanslop")), true);
+});
+
+test("link-cli sees one PATH even when the environment spells it Path", async () => {
+  const rec = recordingExec([]);
+  const { deps } = makeDeps({
+    origin: "https://app.example",
+    home: tempHome(),
+    execFile: async (file, args, opts) => {
+      assert.deepEqual(
+        Object.keys(opts?.env ?? {}).filter((key) => key.toUpperCase() === "PATH"),
+        ["PATH"]
+      );
+      return rec.execFile(file, args, opts);
+    },
+    envExtra: { PATH: "/usr/bin" },
+  });
+  const saved = process.env.Path;
+  process.env.Path = "/repo/node_modules/.bin";
+  try {
+    await runLinkCli(deps, ["auth", "status"]);
+  } finally {
+    if (saved === undefined) delete process.env.Path;
+    else process.env.Path = saved;
+  }
+  assert.equal(rec.calls[0]!.path, "/usr/bin");
+});
+
+test("linkCliSearchPath keeps unrelated entries and splits Windows PATH on ;", () => {
+  assert.equal(
+    linkCliSearchPath("C:\\tools;relative;C:\\node", "win32", ["/repo"]),
+    "C:\\tools;C:\\node"
+  );
+  assert.equal(linkCliSearchPath("/opt/bin:/repo/node_modules/.bin", "linux", ["/repo"]), "/opt/bin");
+});
+
+test("linkCliSearchPath drops a Windows repo's node_modules\\.bin in any case, and those above it", () => {
+  const path = [
+    "C:\\Repo\\node_modules\\.bin",
+    "C:\\repo\\web\\NODE_MODULES\\.Bin\\",
+    "C:\\node_modules\\.bin",
+    "C:\\Users\\me\\AppData\\npm-cache\\_npx\\abc\\node_modules\\.bin",
+    "C:\\tools",
+    "D:\\repo\\node_modules\\.bin",
+  ].join(";");
+  assert.equal(
+    linkCliSearchPath(path, "win32", ["C:\\repo\\web", "C:\\repo"]),
+    [
+      "C:\\Users\\me\\AppData\\npm-cache\\_npx\\abc\\node_modules\\.bin",
+      "C:\\tools",
+      "D:\\repo\\node_modules\\.bin",
+    ].join(";")
+  );
+});
+
+test("a relative CLEANSLOP_LINK_CLI still means the person's folder", async () => {
+  const home = tempHome();
+  const work = join(home, "work");
+  mkdirSync(work, { recursive: true });
+  for (const [raw, file] of [
+    ["./bin/link-cli", join(work, "bin", "link-cli")],
+    ["/opt/link-cli", "/opt/link-cli"],
+    // A bare name stays a PATH lookup (on the filtered PATH).
+    ["link-cli", "link-cli"],
+  ] as const) {
+    const rec = recordingExec([]);
+    const { deps } = makeDeps({
+      origin: "https://app.example",
+      home,
+      cwd: work,
+      execFile: rec.execFile,
+      envExtra: { CLEANSLOP_LINK_CLI: raw },
+    });
+    await runLinkCli(deps, ["auth", "status"]);
+    assert.deepEqual(rec.calls.map((call) => call.file), [file, file], raw);
+    assert.equal(rec.calls[0]!.cwd, join(home, ".config", "cleanslop"));
+  }
 });
 
 test("runLinkCli falls back to the pinned npx link-cli when it is not on PATH", async () => {
@@ -1074,6 +1267,7 @@ test("runLinkCli falls back to the pinned npx link-cli when it is not on PATH", 
     rec.calls.map((call) => call.file),
     ["link-cli", "npx", "npx"]
   );
+  assert.deepEqual(rec.calls[0]!.args, ["--version"]);
   assert.deepEqual(rec.calls[1]!.args, [
     "--yes",
     "--package",
@@ -1119,4 +1313,32 @@ test("CLEANSLOP_LINK_CLI skips the PATH probe and the npx fallback", async () =>
     rec.calls.map((call) => call.file),
     ["/opt/link-cli"]
   );
+  // A missing override stays missing for the rest of the run.
+  assert.equal((await runLinkCli(deps, ["auth", "status"])).code, 127);
+  assert.equal(rec.calls.length, 1);
+});
+
+test("CLEANSLOP_LINK_CLI older than the minimum fails instead of falling back", async () => {
+  const cases: Array<[string, RegExp]> = [
+    ["1.1.0", /CLEANSLOP_LINK_CLI \(\/opt\/link-cli\) is link-cli 1\.1\.0; CleanSlop needs link-cli 1\.2\.0 or later/],
+    ["1.2.0-beta.1", /is link-cli 1\.2\.0-beta\.1; CleanSlop needs link-cli 1\.2\.0 or later/],
+    ["link-cli dev build", /is link-cli of an unknown version/],
+    // A crash or timeout on --version is not "an unknown version".
+    ["", /did not answer `--version` \(exit 1: Unknown flag: --version\)/],
+  ];
+  for (const [version, message] of cases) {
+    const rec = recordingExec([], { "/opt/link-cli": version });
+    const { deps } = makeDeps({
+      origin: "https://app.example",
+      home: tempHome(),
+      execFile: rec.execFile,
+      envExtra: { CLEANSLOP_LINK_CLI: "/opt/link-cli" },
+    });
+    await assert.rejects(runLinkCli(deps, ["auth", "status"]), (err: unknown) => {
+      assert.match((err as Error).message, message);
+      assert.equal((err as { exitCode?: number }).exitCode, 2);
+      return true;
+    });
+    assert.deepEqual(rec.calls.map((call) => call.file), ["/opt/link-cli"]);
+  }
 });

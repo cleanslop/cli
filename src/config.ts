@@ -18,8 +18,18 @@ export const TOKEN_RE = /cslop_(?:agt|mat|mrt)_[A-Za-z0-9]+/g;
 /** Must match `EN_TERMS.updatedOn` on the server. */
 export const TERMS_UPDATED_ON = "2026-10-09";
 export const LINK_CLI_TIMEOUT_MS = 15_000;
-/** Used when `link-cli` is not on PATH. Pinned: the CLI parses its JSON. */
-export const LINK_CLI_PACKAGE = "@stripe/link-cli@0.29.0";
+/**
+ * Used when `link-cli` is not on PATH or is older than `LINK_CLI_MIN_VERSION`.
+ * Pinned: the CLI parses its JSON.
+ */
+export const LINK_CLI_PACKAGE = "@stripe/link-cli@1.3.0";
+/**
+ * 1.1.0 added `--no-financial-insights` (login otherwise asks for balances and
+ * transactions); 1.2.0 added `spend-request retrieve --next-action`. 1.3.0
+ * (pinned above) needs nothing new from us; its `spend-request simulate`
+ * samples feed `test/fixtures/link-simulation.json`.
+ */
+export const LINK_CLI_MIN_VERSION = "1.2.0";
 export const LINK_CLI_NPX_TIMEOUT_MS = 180_000;
 export const PACK_MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** Same default as `AGENT_UPLOAD_MAX_COMPRESSED_BYTES` on the server. */

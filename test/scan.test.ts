@@ -920,7 +920,7 @@ test("requires_action that cannot auto-resume clears pending so the next scan cr
   process.env.FAKE_LINK_MODE = "ok";
   process.env.FAKE_LINK_STATE = statePath;
   process.env.FAKE_SPEND_STATUS = "requires_action";
-  process.env.FAKE_SPEND_RESOLUTION = "challenge";
+  process.env.FAKE_SPEND_RESOLUTION = "create_new_spend_request";
   process.env.FAKE_SPT = "spt_retry_after_action";
   const first = makeDeps({
     origin: fake.origin,

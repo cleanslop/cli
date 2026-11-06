@@ -1,0 +1,473 @@
+{
+  "link_cli": "1.3.0",
+  "catalog_version": 1,
+  "scenarios": [
+    {
+      "id": "ssn_verification",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "ssn_verification",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required. Please verify your SSN to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=ssn_collection&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "identity_verification",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "identity_verification",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required. Please complete identity verification to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=identity_verification&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "credit_file_match_ca",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "credit_file_match_ca",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=credit_file_match_ca&regional_verification=ca&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "rfc_verification_mx",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "rfc_verification_mx",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=rfc_verification_mx&regional_verification=mx&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "doc_upload_ca",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "doc_upload_ca",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=doc_upload_ca&regional_verification=ca&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "contact_support",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "contact_support",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Identity verification has failed. Please contact support.",
+        "action_url": "https://example.invalid/link-simulation/",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "select_payment_method",
+      "resolution": "create_new_spend_request",
+      "url_kind": "null",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "select_payment_method",
+        "resolution": "create_new_spend_request",
+        "display_message": "This card is not eligible for agentic payments. Link did not decline this transaction. Please contact your bank for more information, and try again with a different card.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "retry_without_delegated_approval",
+      "resolution": "create_new_spend_request",
+      "url_kind": "null",
+      "evidence_kind": "production",
+      "source_envelope": "error_next_action",
+      "next_action": {
+        "type": "retry_without_delegated_approval",
+        "resolution": "create_new_spend_request",
+        "display_message": "Visa requires additional action to complete. Retry the spend request without delegated approval.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "add_payment_method",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "add_payment_method",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "This card is not eligible for agentic payments. Link did not decline this transaction. Please contact your bank for more information, and try again with a different card.",
+        "action_url": "https://example.invalid/link-simulation/wallet?link_action=add_payment_method&spend_request_id=lsrq_simulation",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "update_payment_method",
+      "resolution": "create_new_spend_request",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "update_payment_method",
+        "resolution": "create_new_spend_request",
+        "display_message": "Your payment failed because your billing address could not be verified. Please update your card details and try again.",
+        "action_url": "https://example.invalid/link-simulation/wallet?link_action=update_payment_method&spend_request_id=lsrq_simulation",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "re_authorize",
+      "resolution": "create_new_spend_request",
+      "url_kind": "null",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "re_authorize",
+        "resolution": "create_new_spend_request",
+        "display_message": "This transaction exceeded your authorized spend amount. Please try your payment again.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "three_d_secure",
+      "resolution": "auto_resume",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "three_d_secure",
+        "resolution": "auto_resume",
+        "display_message": "Your bank requires additional verification to complete this payment. Please complete the verification to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=3ds_complete&spend_request_id=lsrq_simulation&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": "2099-01-01T00:30:00Z"
+      }
+    },
+    {
+      "id": "three_d_secure_retry",
+      "resolution": "create_new_spend_request",
+      "url_kind": "null",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "three_d_secure_retry",
+        "resolution": "create_new_spend_request",
+        "display_message": "The verification attempt failed. Please create a new request to try again.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "partner_auth_challenge",
+      "resolution": "auto_resume",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "partner_auth_challenge",
+        "resolution": "auto_resume",
+        "display_message": "Your card requires additional verification to complete this payment. Please complete the verification to continue.",
+        "action_url": "https://example.invalid/link-simulation/activity/approve/lsrq_simulation",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "partner_auth_challenge_retry",
+      "resolution": "create_new_spend_request",
+      "url_kind": "null",
+      "evidence_kind": "documented_compatibility",
+      "source_envelope": "documented_compatibility",
+      "next_action": {
+        "type": "partner_auth_challenge_retry",
+        "resolution": "create_new_spend_request",
+        "display_message": "The verification attempt failed. Please create a new request to try again.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "partner_create_card_enrollment",
+      "resolution": "auto_resume",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "partner_create_card_enrollment",
+        "resolution": "auto_resume",
+        "display_message": "Please continue to finish setting up your payment.",
+        "action_url": "https://example.invalid/link-simulation/activity/approve/lsrq_simulation",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "reauthorize_additional_scope",
+      "resolution": "reauthorize_with_additional_scope",
+      "url_kind": "absent",
+      "evidence_kind": "production",
+      "source_envelope": "error_next_action",
+      "next_action": {
+        "type": "reauthorize_additional_scope",
+        "resolution": "reauthorize_with_additional_scope",
+        "display_message": "The access token is missing the scope required for delegated approval. Re-authenticate the consumer with the required scope."
+      }
+    },
+    {
+      "id": "identity_verification_ca",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "identity_verification",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=identity_verification&regional_verification=ca&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "identity_verification_mx",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "identity_verification",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=identity_verification&regional_verification=mx&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "identity_verification_jp",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "identity_verification",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=identity_verification&regional_verification=jp&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "identity_verification_sg",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "present",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "identity_verification",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=identity_verification&regional_verification=sg&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "credit_file_match_ca_pending",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "null",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "credit_file_match_ca",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "rfc_verification_mx_pending",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "null",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "rfc_verification_mx",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "identity_verification_pending",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "null",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "identity_verification",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "doc_upload_ca_pending",
+      "resolution": "create_new_spend_request_after_completion",
+      "url_kind": "null",
+      "evidence_kind": "contract_variant",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "doc_upload_ca",
+        "resolution": "create_new_spend_request_after_completion",
+        "display_message": "Additional identity verification is required to continue.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "update_payment_method_cvc",
+      "resolution": "create_new_spend_request",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "update_payment_method",
+        "resolution": "create_new_spend_request",
+        "display_message": "Your payment failed because your card's security code could not be verified. Please update your card details and try again.",
+        "action_url": "https://example.invalid/link-simulation/wallet?link_action=update_payment_method&spend_request_id=lsrq_simulation",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "update_payment_method_missing_cardholder_name",
+      "resolution": "create_new_spend_request",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "update_payment_method",
+        "resolution": "create_new_spend_request",
+        "display_message": "Your payment failed because your card is missing a cardholder name. Please update your card details and try again.",
+        "action_url": "https://example.invalid/link-simulation/wallet?link_action=update_payment_method&spend_request_id=lsrq_simulation",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "update_payment_method_expired",
+      "resolution": "create_new_spend_request",
+      "url_kind": "present",
+      "evidence_kind": "production",
+      "source_envelope": "record_status_details",
+      "next_action": {
+        "type": "update_payment_method",
+        "resolution": "create_new_spend_request",
+        "display_message": "Your payment method has expired. Please update it in your Link wallet and try again.",
+        "action_url": "https://example.invalid/link-simulation/wallet?link_action=update_payment_method&spend_request_id=lsrq_simulation",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "partner_auth_challenge_without_url",
+      "resolution": "auto_resume",
+      "url_kind": "null",
+      "evidence_kind": "documented_compatibility",
+      "source_envelope": "documented_compatibility",
+      "next_action": {
+        "type": "partner_auth_challenge",
+        "resolution": "auto_resume",
+        "display_message": "Your card requires additional verification to complete this payment. Please complete the verification to continue.",
+        "action_url": null,
+        "expires_at": null
+      }
+    },
+    {
+      "id": "no_next_action",
+      "resolution": null,
+      "url_kind": "absent",
+      "evidence_kind": "control",
+      "source_envelope": "synthetic_control",
+      "next_action": null
+    },
+    {
+      "id": "three_d_secure_expired",
+      "resolution": "auto_resume",
+      "url_kind": "present",
+      "evidence_kind": "defensive_sample",
+      "source_envelope": "synthetic_control",
+      "next_action": {
+        "type": "three_d_secure",
+        "resolution": "auto_resume",
+        "display_message": "Your bank requires additional verification to complete this payment. Please complete the verification to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=3ds_complete&spend_request_id=lsrq_simulation&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid",
+        "expires_at": "2000-01-01T00:00:00Z"
+      }
+    },
+    {
+      "id": "three_d_secure_without_expiry",
+      "resolution": "auto_resume",
+      "url_kind": "present",
+      "evidence_kind": "defensive_sample",
+      "source_envelope": "synthetic_control",
+      "next_action": {
+        "type": "three_d_secure",
+        "resolution": "auto_resume",
+        "display_message": "Your bank requires additional verification to complete this payment. Please complete the verification to continue.",
+        "action_url": "https://example.invalid/link-simulation/finish_setup?verify=3ds_complete&spend_request_id=lsrq_simulation&intended_email=agent%2Bsimulation%40example.invalid&fromEmail=agent%2Bsimulation%40example.invalid"
+      }
+    },
+    {
+      "id": "null_action_type",
+      "resolution": "auto_resume",
+      "url_kind": "present",
+      "evidence_kind": "defensive_sample",
+      "source_envelope": "synthetic_control",
+      "next_action": {
+        "type": null,
+        "resolution": "auto_resume",
+        "display_message": "Synthetic verification example. Please present the supplied URL to the user.",
+        "action_url": "https://example.invalid/link-simulation/null_action_type",
+        "expires_at": null
+      }
+    },
+    {
+      "id": "unknown_action_type",
+      "resolution": "auto_resume",
+      "url_kind": "present",
+      "evidence_kind": "defensive_sample",
+      "source_envelope": "synthetic_control",
+      "next_action": {
+        "type": "future_verification_example",
+        "resolution": "auto_resume",
+        "display_message": "Synthetic verification example. Please present the supplied URL to the user.",
+        "action_url": "https://example.invalid/link-simulation/unknown_action_type",
+        "expires_at": null
+      }
+    }
+  ]
+}

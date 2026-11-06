@@ -3,6 +3,8 @@ import type { CliDeps, HttpResult } from "../deps.js";
 import { doneQuestion } from "../done-question.js";
 import { asRecord, httpRequest, requireOk } from "../http.js";
 import {
+  AUTO_APPROVE_WAIT_MS,
+  autoApproveTestSpendRequest,
   createLinkSpendRequest,
   ensureLinkPaymentScope,
   grantLinkPayments,
@@ -13,6 +15,7 @@ import {
   retrieveSharedPaymentToken,
   type LinkPaymentStep,
   type OnMissingScope,
+  type SpendRequestSnapshot,
 } from "../link.js";
 import {
   deletePendingSpend,
@@ -113,11 +116,40 @@ export type SpendFlow = {
   what: string;
   /** Prompt and question after Link denied, expired or canceled the request. */
   restart: (status: string) => { humanPrompt: string; question: ActionQuestion };
+  /** Starts a new spend request, e.g. `cleanslop credits buy --link --pack p5 --no-wait`. */
+  newCommand: string;
+  /** What to check once a payment turns out to be charged already. */
+  checkPaid: string;
 };
 
-/** Cents to a display price, e.g. `5.00 USD`. */
+/** Link's minimum is 3 hours ahead; 5 minutes more covers clock skew. */
+const PACK_SPEND_REQUEST_TTL_MS = 3 * 60 * 60_000 + 5 * 60_000;
+
+/**
+ * Credit packs are charged right after approval, so their spend request (and
+ * its token) expires in about 3 hours instead of Link's 7-day default.
+ * Monthly plans keep Link's default: renewals need the token.
+ */
+export function packSpendRequestExpiry(deps: CliDeps): string {
+  return new Date(deps.clock.now() + PACK_SPEND_REQUEST_TTL_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+/** Decimal places of a currency's minor unit: 2 for USD, 0 for JPY, 3 for KWD. */
+function currencyMinorDigits(currency: string): number {
+  try {
+    return (
+      new Intl.NumberFormat("en", { style: "currency", currency }).resolvedOptions()
+        .maximumFractionDigits ?? 2
+    );
+  } catch {
+    return 2;
+  }
+}
+
+/** Minor units to a display price, e.g. `5.00 USD` or `500 JPY`. */
 export function formatPackPrice(amount: number, currency: string): string {
-  return `${(amount / 100).toFixed(2)} ${currency.toUpperCase()}`;
+  const digits = currencyMinorDigits(currency);
+  return `${(amount / 10 ** digits).toFixed(digits)} ${currency.toUpperCase()}`;
 }
 
 /** `p15 (15 scans, 25.00 USD, 1.67 USD per scan, best value)`. */
@@ -277,6 +309,8 @@ function packFlow(pack: string): SpendFlow {
     kind: "pack",
     command: BUY_COMMAND,
     what: `CleanSlop credit pack (${pack})`,
+    newCommand: `${BUY_COMMAND} --pack ${pack} --no-wait`,
+    checkPaid: "the scan balance with `cleanslop whoami`",
     restart: (status) => ({
       humanPrompt: `The Link payment was ${status}. Ask the person whether to try again; if yes, run \`${BUY_COMMAND} --pack ${pack} --no-wait\` for a new spend request.`,
       question: buyPackQuestion(
@@ -315,6 +349,7 @@ type SpendRequestEvent =
   | "expired"
   | "canceled"
   | "requires_action"
+  | "failed"
   | "token_missing";
 
 /**
@@ -327,7 +362,8 @@ export async function reportSpendRequest(
   token: string,
   pending: PendingSpendRequest,
   event: SpendRequestEvent,
-  kind: SpendKind = "pack"
+  kind: SpendKind = "pack",
+  failureCode: string | null = null
 ): Promise<void> {
   if (pending.reported?.includes(event)) return;
   try {
@@ -341,6 +377,7 @@ export async function reportSpendRequest(
         currency: pending.currency,
         testMode: pending.testMode === true,
         ageMs: Math.max(0, deps.clock.now() - pending.createdAt),
+        ...(failureCode ? { failureCode } : {}),
       },
     });
   } catch {
@@ -381,25 +418,141 @@ function notApprovedYet(pending: PendingSpendRequest, flow: SpendFlow): CliError
   });
 }
 
-/** Checks the spend request at least once, then polls until `waitMs` runs out. */
+/** Link's message, then its link when there is one: `Complete 3D Secure. Link: https://…`. */
+function linkStepText(snap: SpendRequestSnapshot, fallback: string): string {
+  const message = snap.displayMessage ?? fallback;
+  return snap.actionUrl ? `${message} Link: ${snap.actionUrl}` : message;
+}
+
+/**
+ * 3D Secure or a partner auth challenge: the same spend request resumes once
+ * the human completes it, so keep the pending file and do not start a new one.
+ */
+function verificationAsk(snap: SpendRequestSnapshot, flow: SpendFlow): string {
+  const step = linkStepText(
+    snap,
+    "Link needs one more step for this payment; check the Link app."
+  );
+  return `Ask the human to complete Link's verification for this ${flow.what}: ${step}`;
+}
+
+function verificationPending(snap: SpendRequestSnapshot, flow: SpendFlow): CliError {
+  return actionError("The Link payment is waiting for verification.", {
+    kind: "approve",
+    humanPrompt: `${verificationAsk(snap, flow)} After they finish, run \`${flow.command} --resume\`. Do not start a new purchase: this one resumes on its own.`,
+    ...(snap.actionUrl ? { url: snap.actionUrl } : {}),
+    question: doneQuestion({
+      id: "link_payment_verification",
+      header: "Verify",
+      question: `${linkStepText(snap, `Complete Link's verification for the ${flow.what}.`)} Done?`,
+      then: { run: `${flow.command} --resume` },
+      notNow: "Nothing is charged until it is verified",
+    }),
+  });
+}
+
+/** The two resolutions that end this request; anything else may still resume. */
+const NEW_REQUEST = "create_new_spend_request";
+const NEW_REQUEST_AFTER = "create_new_spend_request_after_completion";
+
+/**
+ * Link stopped this request for good: say why and drop it. After a step the
+ * human must finish first (`…_after_completion`), "Done" starts the new
+ * request; otherwise the usual "Try again" does.
+ */
+async function stoppedByLink(
+  deps: CliDeps,
+  token: string,
+  pending: PendingSpendRequest,
+  flow: SpendFlow,
+  snap: SpendRequestSnapshot,
+  event: "requires_action" | "failed"
+): Promise<never> {
+  await reportSpendRequest(deps, token, pending, event, flow.kind, snap.failureCode);
+  deletePendingSpend(deps, flow.kind);
+  const reason =
+    event === "failed"
+      ? linkStepText(
+          snap,
+          `Link could not complete this payment${snap.failureCode ? ` (${snap.failureCode})` : ""}.`
+        )
+      : linkStepText(snap, "Link asked for a step that this payment cannot continue from.");
+  const message =
+    snap.displayMessage ??
+    `The Link spend request ${event === "failed" ? "failed" : "needs another step"}.`;
+  const url = snap.actionUrl ? { url: snap.actionUrl } : {};
+  if (snap.resolution === NEW_REQUEST_AFTER) {
+    throw actionError(message, {
+      kind: "ask_human",
+      humanPrompt: `${reason} Ask the human to finish that in Link first; nothing was charged. After they finish, run \`${flow.newCommand}\` for a new payment.`,
+      ...url,
+      question: doneQuestion({
+        id: "link_payment_step",
+        header: "Link",
+        question: `${reason} Then CleanSlop starts a new payment for the ${flow.what}. Done?`,
+        then: { run: flow.newCommand },
+        notNow: "Nothing was charged",
+      }),
+    });
+  }
+  const restart = flow.restart("not completed");
+  throw actionError(message, {
+    kind: "ask_human",
+    humanPrompt: `${reason} ${restart.humanPrompt}`,
+    ...url,
+    // A question tool may show only the question: repeat Link's reason there.
+    question: { ...restart.question, question: `${reason} ${restart.question.question}` },
+  });
+}
+
+/** Re-show the verification block when Link changes what it asks for. */
+function sameAction(a: SpendRequestSnapshot | null, b: SpendRequestSnapshot): boolean {
+  return (
+    a !== null &&
+    a.actionType === b.actionType &&
+    a.actionUrl === b.actionUrl &&
+    a.displayMessage === b.displayMessage
+  );
+}
+
+/**
+ * `approved`: retrieve the token and pay. `submitted` (the charge is still
+ * processing) / `succeeded`: the token was already charged; never start a new
+ * charge.
+ */
+export type SpendOutcome = "approved" | "submitted" | "succeeded";
+
+/**
+ * Checks the spend request at least once (starting from `first`, the create
+ * response, when given), then polls until `waitMs` runs out.
+ */
 export async function pollUntilApproved(
   deps: CliDeps,
   token: string,
   pending: PendingSpendRequest,
   waitMs: number,
   onMissingScope: OnMissingScope,
-  flow: SpendFlow = packFlow(pending.pack)
-): Promise<void> {
+  flow: SpendFlow = packFlow(pending.pack),
+  first?: SpendRequestSnapshot
+): Promise<SpendOutcome> {
   const deadline = deps.clock.now() + waitMs;
+  let verifying: SpendRequestSnapshot | null = null;
+  let next: SpendRequestSnapshot | undefined = first;
   for (;;) {
-    const snap = await retrieveLinkSpendRequest(deps, pending.spendRequestId, {
-      testMode: pending.testMode,
-      onMissingScope,
-    });
+    const snap =
+      next ??
+      (await retrieveLinkSpendRequest(deps, pending.spendRequestId, {
+        testMode: pending.testMode,
+        onMissingScope,
+      }));
+    next = undefined;
     switch (snap.status) {
       case "approved":
         await reportSpendRequest(deps, token, pending, "approved", flow.kind);
-        return;
+        return "approved";
+      case "submitted":
+      case "succeeded":
+        return snap.status;
       case "denied":
       case "expired":
       case "canceled":
@@ -409,19 +562,27 @@ export async function pollUntilApproved(
           kind: "ask_human",
           ...flow.restart(snap.status),
         });
+      case "failed":
+        return stoppedByLink(deps, token, pending, flow, snap, "failed");
       case "requires_action":
-        if (snap.resolution === "auto_resume") break;
-        await reportSpendRequest(deps, token, pending, "requires_action", flow.kind);
-        deletePendingSpend(deps, flow.kind);
-        throw actionError(
-          snap.displayMessage ?? "This spend request needs another approval step.",
-          {
-            kind: "ask_human",
-            humanPrompt:
-              snap.displayMessage ??
-              "Link asked for an extra approval step that CleanSlop cannot resume. Start a new spend request.",
-          }
-        );
+        if (snap.resolution === NEW_REQUEST || snap.resolution === NEW_REQUEST_AFTER) {
+          return stoppedByLink(deps, token, pending, flow, snap, "requires_action");
+        }
+        // `auto_resume`, or no action yet (Link: a null action does not rule
+        // out verification): keep this request and keep checking.
+        if (!verifying) {
+          await reportSpendRequest(deps, token, pending, "requires_action", flow.kind);
+        }
+        // With no wait left the thrown block says the same; print it once per action.
+        if (!sameAction(verifying, snap) && deps.clock.now() < deadline) {
+          writeAction(deps, {
+            kind: "approve",
+            humanPrompt: `${verificationAsk(snap, flow)} Waiting for it to finish.`,
+            ...(snap.actionUrl ? { url: snap.actionUrl } : {}),
+          });
+        }
+        verifying = snap;
+        break;
       case "pending":
       case "unknown":
         break;
@@ -430,9 +591,49 @@ export async function pollUntilApproved(
         throw _exhaustive;
       }
     }
-    if (deps.clock.now() >= deadline) throw notApprovedYet(pending, flow);
+    if (deps.clock.now() >= deadline) {
+      throw verifying ? verificationPending(verifying, flow) : notApprovedYet(pending, flow);
+    }
     await deps.clock.sleep(2000);
   }
+}
+
+/**
+ * After `submitted` / `succeeded`: one token check, no retry loop. With the
+ * token the purchase POST replays the original row (the server looks up by
+ * token and never charges twice); without it the request is simply done.
+ */
+export async function usedPaymentToken(
+  deps: CliDeps,
+  pending: PendingSpendRequest
+): Promise<string | null> {
+  try {
+    const snap = await retrieveLinkSpendRequest(deps, pending.spendRequestId, {
+      includeSpt: true,
+      testMode: pending.testMode,
+    });
+    return snap.sharedPaymentToken;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * An earlier run already charged this request; this run has nothing to
+ * charge. `submitted` is still processing, so say so rather than "went through".
+ */
+export function alreadyPaid(
+  deps: CliDeps,
+  flow: SpendFlow,
+  status: "submitted" | "succeeded"
+): number {
+  deletePendingSpend(deps, flow.kind);
+  deps.io.stdout(
+    status === "submitted"
+      ? `This Link payment for the ${flow.what} was already submitted on an earlier run and is still processing; nothing new was charged. Check ${flow.checkPaid} in a minute.\n`
+      : `This Link payment for the ${flow.what} already went through on an earlier run; nothing new was charged. Check ${flow.checkPaid}.\n`
+  );
+  return EXIT_OK;
 }
 
 async function postPurchase(
@@ -560,6 +761,9 @@ export async function buyLinkCredits(
   const resumeId = args.spendRequestId?.trim() || existing?.spendRequestId || null;
 
   let pending: PendingSpendRequest;
+  let waitMs = linkApprovalWaitMs(args, opts);
+  /** The create response, when Link already moved it past pending approval. */
+  let first: SpendRequestSnapshot | undefined;
   if (resumeId) {
     const fromStore = existing && existing.spendRequestId === resumeId ? existing : null;
     pending = {
@@ -650,6 +854,7 @@ export async function buyLinkCredits(
       total: `type:total,display_text:Total,amount:${amount}`,
       idempotencyKey: deps.randomId(),
       testMode,
+      expiresAt: packSpendRequestExpiry(deps),
     });
     pending = {
       version: 1,
@@ -666,12 +871,20 @@ export async function buyLinkCredits(
     };
     await persistPending(deps, pending);
     await reportSpendRequest(deps, stored.token, pending, "created");
+    // Link can attach an action (or a failure) at creation: same handling as a poll.
+    const settled = created.status !== "pending" && created.status !== "unknown";
+    if (settled) first = created;
+    const autoApproved =
+      !settled && (await autoApproveTestSpendRequest(deps, created.id, testMode));
+    // The test helper's approval can lag a little, even under --no-wait.
+    if (autoApproved) waitMs = Math.max(waitMs, AUTO_APPROVE_WAIT_MS);
     const price = formatPackPrice(amount, currency);
     const ask = created.approvalUrl
       ? `Ask the human to open this link and approve this CleanSlop credit pack (${pack}: ${scans} scans for ${price}). Link may also send a notification.`
       : `Ask the human to approve this CleanSlop credit pack (${pack}: ${scans} scans for ${price}) ${IN_LINK_APP}.`;
     const url = created.approvalUrl ? { url: created.approvalUrl } : {};
-    if (mode !== "wait") {
+    const prompt = !settled && !autoApproved;
+    if (prompt && mode !== "wait") {
       throw actionError("Link payment approval pending.", {
         kind: "approve",
         humanPrompt: `${ask} After they approve, run \`${BUY_COMMAND} --resume\`.`,
@@ -682,7 +895,9 @@ export async function buyLinkCredits(
         ),
       });
     }
-    writeAction(deps, { kind: "approve", humanPrompt: `${ask} Waiting for approval.`, ...url });
+    if (prompt) {
+      writeAction(deps, { kind: "approve", humanPrompt: `${ask} Waiting for approval.`, ...url });
+    }
   }
 
   // Link refuses retrieve without the payment scope even when `auth status`
@@ -694,18 +909,24 @@ export async function buyLinkCredits(
     await grantLinkPayments(deps, { mode, command: BUY_COMMAND });
     return true;
   };
-  await pollUntilApproved(
+  const flow = packFlow(pending.pack);
+  const outcome = await pollUntilApproved(
     deps,
     stored.token,
     pending,
-    linkApprovalWaitMs(args, opts),
-    onMissingScope
+    waitMs,
+    onMissingScope,
+    flow,
+    first
   );
-  const sharedPaymentToken = await retrieveSharedPaymentToken(
-    deps,
-    pending.spendRequestId,
-    { testMode: pending.testMode, onMissingScope }
-  );
+  const sharedPaymentToken =
+    outcome !== "approved"
+      ? await usedPaymentToken(deps, pending)
+      : await retrieveSharedPaymentToken(deps, pending.spendRequestId, {
+          testMode: pending.testMode,
+          onMissingScope,
+        });
+  if (!sharedPaymentToken && outcome !== "approved") return alreadyPaid(deps, flow, outcome);
   if (!sharedPaymentToken) {
     await reportSpendRequest(deps, stored.token, pending, "token_missing");
     tokenMissingAction(pending.spendRequestId);

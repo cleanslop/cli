@@ -18,20 +18,21 @@ npx -y @cleanslop/cli scan
 
 Run it from a git checkout whose `HEAD` is pushed to github.com. Then `npx -y @cleanslop/cli setup` installs the skill or rules for Claude Code, Cursor and Codex so your agent runs it for you.
 
-Requires Node 22 or later (Node 20 is end-of-life; npm warns there). **Zero runtime dependencies.** Link commands shell out to `link-cli` (`CLEANSLOP_LINK_CLI`, else `PATH`, else a pinned `npx @stripe/link-cli`); uploads pack with a built-in tar writer.
+Requires Node 22 or later (Node 20 is end-of-life; npm warns there). **Zero runtime dependencies.** Link commands shell out to `link-cli` 1.2.0 or later: `CLEANSLOP_LINK_CLI` (an older one is an error), else `link-cli` on `PATH` when it is new enough, else the pinned `npx @stripe/link-cli@1.3.0`. link-cli runs from the CLI's config folder with the project's `node_modules/.bin` off `PATH`, so the repo you scan can't choose it; uploads pack with a built-in tar writer.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
 | `scan` (default) | Resolve the github.com origin + HEAD, start a scan, optionally `--wait` |
-| `login [--no-wait \| --resume]` | RFC 8628 device flow. Prints `verification_uri_complete` and `user_code`. `--no-wait` stores the device code; `--resume` finishes it. Never prints the token. |
+| `login [--link [--agree]] [--no-wait \| --resume]` | RFC 8628 device flow. Prints `verification_uri_complete` and `user_code`. `--no-wait` stores the device code; `--resume` finishes it. `--link` signs up or signs in with Stripe Link through `link-cli` instead of GitHub; pass `--agree` only after the human says yes to the quoted terms question. Never prints the token. |
 | `logout [--all]` | Revoke server-side, delete this origin's credentials, and drop its pending GitHub login and Link payment. `--all` revokes every saved origin's token and deletes all local CleanSlop data (Link's own session and `~/.link-cli` files stay; `link-cli auth logout` clears the session) |
 | `whoami` | Connected `@login` and token last4 |
 | `status [id] [--wait]` | Poll scan status |
 | `report [id] [--format md\|json] [--preview]` | Fetch `cleanslop.report.v1` (the whole list: `limit=250`). A final Markdown report with confirmed or needs-input findings is followed on stderr by a `fix_findings` question (Fix them / Show me first / Not now); `scan` does the same. Exit stays 0. |
 | `setup` | Idempotent skill/rules. Never logs in, never writes a token |
 | `redeem <code>` | Redeem a promo (invite) code the human gave you for free scans (`POST /api/agent/v1/credits/redeem`). One code per account; `promo_invalid` / `promo_already_redeemed` exit 12 with an `ask_human` block. |
+| `credits buy --link [--pack p5\|p15\|p40] [--no-promo] [--no-wait \| --resume]` | Link account: buys a one-time credit pack from a Link approval (`link-cli spend-request create`), then `POST /api/agent/v1/credits/purchases`. `--pack` is required without a terminal (the human picks); a terminal defaults to `p5`. `--no-promo` skips the promo-code choice. `--no-wait` prints what to approve and exits 10; `--resume` continues it, saved in `pending-spend-request.json`. |
 | `billing` | Link account: `POST /api/agent/v1/billing/sign-in-link` has the server email a sign-in link to the account's Link address, where the human subscribes, buys credits or cancels a plan. Prints the masked address it went to, plus `/signin/email?from=agent` and the masked email to type if it does not arrive. When the server cannot send (email login off, rate limited) or is older (404, read `webBilling` from `GET /me`), it prints only the typed-address page. The CLI never sees the link. Exits 10 with an `ask_human` block; `--json` prints `{sent, expiresAt \| reason, webBilling}`. Prints "Not available for this account" (exit 0) without `webBilling`. |
 | `plan [starter\|pro\|max]` | Link account: starts a monthly plan paid each month from a recurring Link approval (`link-cli spend-request create --recurring-interval month`), then `POST /api/agent/v1/plans/purchases`. Without a plan name an agent gets a `link_plan` question (Starter, Pro, Max with monthly prices, Not now). Same `--no-wait` / `--resume` flow as `credits buy --link`, saved in its own `pending-plan-request.json`. When CleanSlop offers no Link plans it does what `billing` does. Prints "Started the CleanSlop … plan" (exit 0). Change or cancel the plan with `billing`. |
 

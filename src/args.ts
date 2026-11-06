@@ -317,7 +317,8 @@ Flags:
 Env:
   CLEANSLOP_ORIGIN   API origin (default https://cleanslop.com)
   CLEANSLOP_TOKEN    bearer token override (never printed)
-  CLEANSLOP_LINK_CLI path to link-cli (default: link-cli on PATH)
+  CLEANSLOP_LINK_CLI path to link-cli 1.2.0+ (default: link-cli on PATH if 1.2.0+,
+                     else npx @stripe/link-cli@1.3.0)
 
 Credentials: $XDG_CONFIG_HOME/cleanslop/credentials.json or ~/.config/cleanslop/
 Directory 0700, file 0600. Never stored inside the git worktree.

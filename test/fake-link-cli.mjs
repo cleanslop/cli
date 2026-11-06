@@ -23,6 +23,8 @@ const EMPTY_STATE = {
   upgrades: 0,
   attestationRequests: 0,
   credentialRequests: 0,
+  nextActionRetrieves: 0,
+  testApprovals: 0,
 };
 
 const UNAUTH_MODES = [
@@ -61,6 +63,13 @@ function loadState() {
       lastScope: typeof parsed.lastScope === "string" ? parsed.lastScope : null,
       attestationRequests: Number(parsed.attestationRequests) || 0,
       credentialRequests: Number(parsed.credentialRequests) || 0,
+      nextActionRetrieves: Number(parsed.nextActionRetrieves) || 0,
+      testApprovals: Number(parsed.testApprovals) || 0,
+      lastExpiresAt:
+        typeof parsed.lastExpiresAt === "string" ? parsed.lastExpiresAt : null,
+      createKeys: Array.isArray(parsed.createKeys) ? parsed.createKeys : [],
+      lastLoginArgs: Array.isArray(parsed.lastLoginArgs) ? parsed.lastLoginArgs : null,
+      lastUpgradeArgs: Array.isArray(parsed.lastUpgradeArgs) ? parsed.lastUpgradeArgs : null,
     };
   } catch {
     return { ...EMPTY_STATE };
@@ -71,6 +80,13 @@ function saveState(state) {
   const path = process.env.FAKE_LINK_STATE;
   if (!path) return;
   writeFileSync(path, `${JSON.stringify(state)}\n`);
+}
+
+// link-cli (incur) prints its bare version.
+if (args.length === 1 && args[0] === "--version") {
+  if (mode === "version-fail") fail("Unknown flag: --version");
+  process.stdout.write(`${process.env.FAKE_LINK_VERSION ?? "1.2.0"}\n`);
+  process.exit(0);
 }
 
 if (joined.includes("auth status")) {
@@ -123,6 +139,7 @@ if (joined.includes("auth upgrade")) {
   if (mode === "auth-upgrade-fail") fail("Link upgrade failed");
   const state = loadState();
   state.upgrades += 1;
+  state.lastUpgradeArgs = args;
   state.lastScope = scopeFromArgs(args);
   if (state.lastScope) {
     const tokens = new Set(
@@ -150,6 +167,7 @@ if (joined.includes("auth login")) {
   if (mode === "auth-login-fail") fail("Link login failed");
   const state = loadState();
   state.logins += 1;
+  state.lastLoginArgs = args;
   state.lastScope = scopeFromArgs(args);
   if (state.lastScope) state.scope = state.lastScope;
   saveState(state);
@@ -244,6 +262,18 @@ if (joined.includes("attestations request")) {
 
 if (joined.includes("spend-request create")) {
   if (mode === "spend-create-fail") fail("could not create spend request");
+  {
+    const keyIdx = args.indexOf("--idempotency-key");
+    const attempt = loadState();
+    attempt.createKeys = [...(attempt.createKeys ?? []), keyIdx >= 0 ? args[keyIdx + 1] : null];
+    saveState(attempt);
+  }
+  if (mode === "expiry-rejected" && args.includes("--expires-at")) {
+    fail('Failed to create spend request (400): {"error":{"message":"expires_at is beyond the maximum for this country"}}');
+  }
+  if (mode === "expiry-unclear" && args.includes("--expires-at")) {
+    fail("Request timed out after 15000ms while sending expires_at");
+  }
   if (mode === "spend-create-bad-json") {
     process.stdout.write("not-json");
     process.exit(0);
@@ -257,9 +287,16 @@ if (joined.includes("spend-request create")) {
   state.lastTest = args.includes("--test");
   const recurringIdx = args.indexOf("--recurring-interval");
   state.lastRecurring = recurringIdx >= 0 ? args[recurringIdx + 1] ?? null : null;
+  const expiresIdx = args.indexOf("--expires-at");
+  state.lastExpiresAt = expiresIdx >= 0 ? args[expiresIdx + 1] ?? null : null;
   const id = process.env.FAKE_SPEND_REQUEST_ID ?? "sr_test_1";
-  state.lastCreateStatus = "pending_approval";
+  const createStatus = process.env.FAKE_CREATE_STATUS;
+  state.lastCreateStatus = createStatus ?? "pending_approval";
   saveState(state);
+  if (createStatus) {
+    writeOut([spendRecord(id, createStatus)]);
+    process.exit(0);
+  }
   writeOut([
     {
       id,
@@ -272,6 +309,104 @@ if (joined.includes("spend-request create")) {
       },
     },
   ]);
+  process.exit(0);
+}
+
+if (joined.includes("test-helpers spend-request approve")) {
+  if (process.env.LINK_TEST_HELPERS !== "1") fail("test-helpers requires LINK_TEST_HELPERS=1");
+  if (mode === "test-approve-fail") fail("Spend request is not a demo request");
+  const state = loadState();
+  state.testApprovals += 1;
+  saveState(state);
+  writeOut({ id: args[3], status: "approved" });
+  process.exit(0);
+}
+
+/**
+ * link-cli's `NextAction` for FAKE_LINK_MODE / FAKE_SPEND_RESOLUTION, or
+ * FAKE_NEXT_ACTION_JSON verbatim (a `spend-request simulate` sample).
+ */
+function fakeNextAction(status) {
+  if (process.env.FAKE_NEXT_ACTION_JSON !== undefined) {
+    return JSON.parse(process.env.FAKE_NEXT_ACTION_JSON);
+  }
+  if (process.env.FAKE_NO_ACTION === "1") return null;
+  if (status === "failed") {
+    return {
+      type: "update_payment_method",
+      resolution: process.env.FAKE_FAILED_RESOLUTION ?? "create_new_spend_request_after_completion",
+      display_message: process.env.FAKE_NEXT_MESSAGE ?? "Your card was declined. Update it in Link.",
+      action_url: "https://app.link.com/wallet",
+    };
+  }
+  const resolution =
+    mode === "spend-auto-resume"
+      ? "auto_resume"
+      : process.env.FAKE_SPEND_RESOLUTION ?? "create_new_spend_request";
+  // FAKE_ACTION_CHANGES_AT: from that poll on, Visa OTP turns into card enrollment.
+  const changeAt = Number(process.env.FAKE_ACTION_CHANGES_AT ?? 0);
+  if (changeAt > 0 && loadState().polls >= changeAt) {
+    return {
+      type: "partner_create_card_enrollment",
+      resolution,
+      display_message: "Confirm the card in your bank app.",
+      action_url: "https://hooks.stripe.com/3d_secure/test",
+    };
+  }
+  return {
+    type: resolution === "auto_resume" ? "three_d_secure" : "add_payment_method",
+    resolution,
+    display_message: "Complete 3DS in Link.",
+    action_url: "https://hooks.stripe.com/3d_secure/test",
+  };
+}
+
+/** link-cli's real shape: the action lives under `status_details.<status>`. */
+function spendRecord(id, status) {
+  const next = mode === "spend-next-action-only" ? null : fakeNextAction(status);
+  if (status === "requires_action") {
+    return { id, status, status_details: { requires_action: { failure_code: null, next_action: next } } };
+  }
+  if (status === "failed") {
+    return {
+      id,
+      status,
+      status_details: {
+        failed: { code: process.env.FAKE_FAILED_CODE ?? "card_declined", next_action: next },
+      },
+      ...(process.env.FAKE_PAYMENT_DECLINE
+        ? {
+            payment_status_details: {
+              outcome: "failure",
+              code: "card_declined",
+              decline_code: process.env.FAKE_PAYMENT_DECLINE,
+              amount: 1000,
+              currency: "usd",
+            },
+          }
+        : {}),
+    };
+  }
+  return { id, status };
+}
+
+if (joined.includes("spend-request retrieve") && args.includes("--next-action")) {
+  const state = loadState();
+  state.nextActionRetrieves += 1;
+  saveState(state);
+  if (mode === "next-action-fail") fail("Unknown flag: --next-action");
+  const status =
+    mode === "spend-auto-resume" ? "requires_action" : process.env.FAKE_SPEND_STATUS ?? "approved";
+  const action = status === "requires_action" || status === "failed" ? fakeNextAction(status) : null;
+  const next =
+    action && process.env.FAKE_NEXT_ACTION_EMPTY !== "1"
+      ? {
+          ...action,
+          ...(mode === "spend-next-action-only" ? { display_message: "From --next-action." } : {}),
+        }
+      : null;
+  // link-cli prints one result item.
+  writeOut([{ next_action: next }]);
   process.exit(0);
 }
 
@@ -321,35 +456,30 @@ if (joined.includes("spend-request retrieve")) {
   if (!includeSpt) {
     state.polls = (state.polls || 0) + 1;
     saveState(state);
-    if (mode === "spend-auto-resume" && state.polls < 2) {
-      writeOut({
-        id,
-        status: "requires_action",
-        next_action: { resolution: { type: "auto_resume" } },
-      });
+    if (state.testApprovals > 0) {
+      // FAKE_APPROVE_LAG_POLLS: the helper's approval shows up only after that many polls.
+      const lag = Number(process.env.FAKE_APPROVE_LAG_POLLS ?? 0);
+      writeOut({ id, status: state.polls > lag ? "approved" : "pending_approval" });
+      process.exit(0);
+    }
+    if (mode === "spend-auto-resume" && state.polls < Number(process.env.FAKE_RESUME_POLLS ?? 2)) {
+      writeOut(spendRecord(id, "requires_action"));
       process.exit(0);
     }
     if (mode === "spend-pending" && state.polls < 2) {
       writeOut({ id, status: "pending_approval" });
       process.exit(0);
     }
-    if (status === "requires_action") {
-      writeOut({
-        id,
-        status,
-        next_action: {
-          resolution: process.env.FAKE_SPEND_RESOLUTION ?? "challenge",
-          display_message: "Complete 3DS in Link.",
-        },
-      });
-      process.exit(0);
-    }
-    writeOut({ id, status });
+    writeOut(spendRecord(id, status));
     process.exit(0);
   }
   state.includeRetrieves += 1;
   saveState(state);
   const token = process.env.FAKE_SPT ?? "spt_test_1";
+  if (status === "submitted" || status === "succeeded") {
+    writeOut({ id, status, ...(process.env.FAKE_USED_NO_SPT === "1" ? {} : { shared_payment_token: token }) });
+    process.exit(0);
+  }
   if (mode === "spt-missing") {
     writeOut({ id, status: "approved" });
     process.exit(0);

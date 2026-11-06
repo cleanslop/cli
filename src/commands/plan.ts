@@ -2,6 +2,8 @@ import { writeAction } from "../action.js";
 import type { CliDeps } from "../deps.js";
 import { asRecord, httpRequest, requireOk, throwHttpError } from "../http.js";
 import {
+  AUTO_APPROVE_WAIT_MS,
+  autoApproveTestSpendRequest,
   createLinkSpendRequest,
   ensureLinkPaymentScope,
   grantLinkPayments,
@@ -10,6 +12,7 @@ import {
   linkSpendRequestTestMode,
   retrieveSharedPaymentToken,
   type OnMissingScope,
+  type SpendRequestSnapshot,
 } from "../link.js";
 import {
   deletePendingSpend,
@@ -31,6 +34,7 @@ import { BILLING_COMMAND, NOT_NOW, PLAN_COMMAND } from "../top-up.js";
 import type { ParsedArgs } from "../types.js";
 import { runBilling } from "./billing.js";
 import {
+  alreadyPaid,
   approvalNote,
   approvalPromptTail,
   formatPackPrice,
@@ -41,6 +45,7 @@ import {
   pollUntilApproved,
   reportSpendRequest,
   tokenMissingAction,
+  usedPaymentToken,
   type SpendFlow,
 } from "./credits.js";
 
@@ -120,6 +125,8 @@ function planFlow(plan: string): SpendFlow {
     kind: "plan",
     command: PLAN_COMMAND,
     what: `CleanSlop ${name} plan`,
+    newCommand: startCommand(plan),
+    checkPaid: "the plan with `cleanslop whoami`",
     restart: (status) => ({
       humanPrompt: `The Link approval was ${status}. Ask the person whether to try again; if yes, run \`${startCommand(plan)}\` for a new spend request.`,
       question: {
@@ -276,6 +283,9 @@ export async function runPlan(deps: CliDeps, args: ParsedArgs): Promise<number> 
     throw usageError(`No Link plan approval to resume. Run \`${PLAN_COMMAND} <starter|pro|max> --no-wait\`.`);
   }
 
+  let waitMs = mode === "no-wait" ? 0 : mode === "resume" ? LINK_RESUME_WAIT_MS : LINK_APPROVAL_WAIT_MS;
+  /** The create response, when Link already moved it past pending approval. */
+  let first: SpendRequestSnapshot | undefined;
   if (pending) {
     await ensureLinkPaymentScope(deps, { mode, command: PLAN_COMMAND });
   } else {
@@ -311,12 +321,20 @@ export async function runPlan(deps: CliDeps, args: ParsedArgs): Promise<number> 
     };
     await writePendingSpend(deps, pending, "plan");
     await reportSpendRequest(deps, stored.token, pending, "created", "plan");
+    // Link can attach an action (or a failure) at creation: same handling as a poll.
+    const settled = created.status !== "pending" && created.status !== "unknown";
+    if (settled) first = created;
+    const autoApproved =
+      !settled && (await autoApproveTestSpendRequest(deps, created.id, testMode));
+    // The test helper's approval can lag a little, even under --no-wait.
+    if (autoApproved) waitMs = Math.max(waitMs, AUTO_APPROVE_WAIT_MS);
+    const prompt = !settled && !autoApproved;
     const what = `the CleanSlop ${offer.name} plan (${monthlyPrice(offer.amount, offer.currency)}, charged each month until they cancel with \`${BILLING_COMMAND}\`)`;
     const ask = created.approvalUrl
       ? `Ask the human to open this link and approve ${what}. Link may also send a notification.`
       : `Ask the human to approve ${what} ${IN_LINK_APP}.`;
     const url = created.approvalUrl ? { url: created.approvalUrl } : {};
-    if (mode !== "wait") {
+    if (prompt && mode !== "wait") {
       throw actionError("Link plan approval pending.", {
         kind: "approve",
         humanPrompt: `${ask} After they approve, run \`${PLAN_COMMAND} --resume\`.`,
@@ -328,7 +346,9 @@ export async function runPlan(deps: CliDeps, args: ParsedArgs): Promise<number> 
         ),
       });
     }
-    writeAction(deps, { kind: "approve", humanPrompt: `${ask} Waiting for approval.`, ...url });
+    if (prompt) {
+      writeAction(deps, { kind: "approve", humanPrompt: `${ask} Waiting for approval.`, ...url });
+    }
   }
 
   let regranted = false;
@@ -338,12 +358,16 @@ export async function runPlan(deps: CliDeps, args: ParsedArgs): Promise<number> 
     await grantLinkPayments(deps, { mode, command: PLAN_COMMAND });
     return true;
   };
-  const waitMs = mode === "no-wait" ? 0 : mode === "resume" ? LINK_RESUME_WAIT_MS : LINK_APPROVAL_WAIT_MS;
-  await pollUntilApproved(deps, stored.token, pending, waitMs, onMissingScope, planFlow(pending.pack));
-  const sharedPaymentToken = await retrieveSharedPaymentToken(deps, pending.spendRequestId, {
-    testMode: pending.testMode,
-    onMissingScope,
-  });
+  const flow = planFlow(pending.pack);
+  const outcome = await pollUntilApproved(deps, stored.token, pending, waitMs, onMissingScope, flow, first);
+  const sharedPaymentToken =
+    outcome !== "approved"
+      ? await usedPaymentToken(deps, pending)
+      : await retrieveSharedPaymentToken(deps, pending.spendRequestId, {
+          testMode: pending.testMode,
+          onMissingScope,
+        });
+  if (!sharedPaymentToken && outcome !== "approved") return alreadyPaid(deps, flow, outcome);
   if (!sharedPaymentToken) {
     await reportSpendRequest(deps, stored.token, pending, "token_missing", "plan");
     tokenMissingAction(pending.spendRequestId, PLAN_COMMAND);

@@ -18,10 +18,11 @@ import {
 } from "../src/commands/credits.js";
 import { parseArgs } from "../src/args.js";
 import { runCli } from "../src/main.js";
-import { LINK_CLI_TIMEOUT_MS } from "../src/config.js";
+import { LINK_CLI_PACKAGE, LINK_CLI_TIMEOUT_MS } from "../src/config.js";
 import { EXIT_USAGE } from "../src/exit.js";
 import {
   createLinkSpendRequest,
+  parseNextAction,
   parseSpendRequestJson,
   SPT_RETRIEVAL_DELAYS_MS,
 } from "../src/link.js";
@@ -49,6 +50,18 @@ const envKeys = [
   "FAKE_SPEND_RESOLUTION",
   "FAKE_SPT",
   "FAKE_LIST_NO_SPT",
+  "FAKE_RESUME_POLLS",
+  "FAKE_NEXT_MESSAGE",
+  "FAKE_FAILED_RESOLUTION",
+  "FAKE_FAILED_CODE",
+  "FAKE_PAYMENT_DECLINE",
+  "FAKE_NO_ACTION",
+  "FAKE_NEXT_ACTION_EMPTY",
+  "FAKE_ACTION_CHANGES_AT",
+  "FAKE_CREATE_STATUS",
+  "FAKE_APPROVE_LAG_POLLS",
+  "FAKE_USED_NO_SPT",
+  "FAKE_NEXT_ACTION_JSON",
 ] as const;
 
 afterEach(async () => {
@@ -169,15 +182,87 @@ test("parseSpendRequestJson reads object tokens and next_action shapes", () => {
     )?.approvalUrl,
     "https://app.link.com/spend/approve?code=x"
   );
+  // link-cli's real shape: the action lives under status_details.<status>.
   const nested = parseSpendRequestJson(
     JSON.stringify({
       id: "sr_2",
       status: "requires_action",
-      next_action: { resolution: { type: "auto_resume" }, display_message: "wait" },
+      status_details: {
+        requires_action: {
+          failure_code: null,
+          next_action: {
+            type: "three_d_secure",
+            resolution: "auto_resume",
+            display_message: "Complete 3D Secure.",
+            action_url: "https://hooks.stripe.com/3ds",
+            expires_at: "2026-11-04T20:00:00Z",
+          },
+        },
+      },
     })
   );
   assert.equal(nested?.resolution, "auto_resume");
-  assert.equal(nested?.displayMessage, "wait");
+  assert.equal(nested?.actionType, "three_d_secure");
+  assert.equal(nested?.displayMessage, "Complete 3D Secure.");
+  assert.equal(nested?.actionUrl, "https://hooks.stripe.com/3ds");
+  const failed = parseSpendRequestJson(
+    JSON.stringify({
+      id: "sr_f",
+      status: "failed",
+      status_details: {
+        failed: {
+          code: "card_declined",
+          next_action: { type: null, resolution: "create_new_spend_request", display_message: "Declined.", action_url: "javascript:x" },
+        },
+      },
+    })
+  );
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.failureCode, "card_declined");
+  assert.equal(failed?.actionType, null);
+  assert.equal(failed?.actionUrl, null);
+  assert.equal(failed?.resolution, "create_new_spend_request");
+  // Already charged: kept apart from approved so the CLI never pays again.
+  for (const status of ["submitted", "succeeded"]) {
+    assert.equal(parseSpendRequestJson(JSON.stringify({ id: "sr_s", status }))?.status, status);
+  }
+  // A failed payment's decline code, and the current status's action winning.
+  const declined = parseSpendRequestJson(
+    JSON.stringify({
+      id: "sr_d",
+      status: "failed",
+      payment_status_details: { outcome: "failure", code: "card_declined", decline_code: "insufficient_funds" },
+      status_details: {
+        requires_action: { next_action: { resolution: "auto_resume", display_message: "Old 3DS." } },
+        failed: { next_action: { resolution: "create_new_spend_request", display_message: "Declined." } },
+      },
+    })
+  );
+  assert.equal(declined?.failureCode, "insufficient_funds");
+  assert.equal(declined?.resolution, "create_new_spend_request");
+  assert.equal(declined?.displayMessage, "Declined.");
+  // Free-form text is never taken as a code, and a successful payment has none.
+  assert.equal(
+    parseSpendRequestJson(
+      JSON.stringify({
+        id: "sr_e",
+        status: "failed",
+        status_details: { failed: { code: "declined: call <bank>" } },
+        payment_status_details: { outcome: "success", code: "ok" },
+      })
+    )?.failureCode,
+    null
+  );
+  // Older shapes: a top-level next_action, and an object resolution.
+  const legacy = parseSpendRequestJson(
+    JSON.stringify({
+      id: "sr_3",
+      status: "requires_action",
+      next_action: { resolution: { type: "auto_resume" }, display_message: "wait" },
+    })
+  );
+  assert.equal(legacy?.resolution, "auto_resume");
+  assert.equal(legacy?.displayMessage, "wait");
   const fromArray = parseSpendRequestJson(
     JSON.stringify([
       { id: "sr_old", status: "created" },
@@ -259,6 +344,9 @@ test("createLinkSpendRequest uses the default link-cli timeout", async () => {
     origin: "https://app.example",
     home: tempHome(),
     execFile: async (_file, args, opts) => {
+      if (args.length === 1 && args[0] === "--version") {
+        return { ok: true, stdout: "1.2.0\n", stderr: "", code: 0 };
+      }
       if (args.includes("spend-request") && args.includes("create")) {
         timeouts.push(opts?.timeout);
         return {
@@ -1097,7 +1185,7 @@ test("credits buy maps denied, extra-action, timeout, and create failures", asyn
   assert.equal(retry?.options[1]?.value, "none");
 
   process.env.FAKE_SPEND_STATUS = "requires_action";
-  process.env.FAKE_SPEND_RESOLUTION = "challenge";
+  process.env.FAKE_SPEND_RESOLUTION = "create_new_spend_request";
   const action = makeDeps({
     origin: fake.origin,
     home: tempHome(),
@@ -1636,4 +1724,621 @@ test("an agent's credits buy names the monthly plan for a Link-only account", as
     ["p5", "p15", "web_billing", "none"]
   );
   assert.equal(readState(statePath).creates, 0);
+});
+
+test("formatPackPrice uses each currency's minor unit", () => {
+  assert.equal(formatPackPrice(500, "usd"), "5.00 USD");
+  assert.equal(formatPackPrice(500, "jpy"), "500 JPY");
+  assert.equal(formatPackPrice(1234, "kwd"), "1.234 KWD");
+  assert.equal(formatPackPrice(500, "not a currency"), "5.00 NOT A CURRENCY");
+});
+
+function linkBuyDeps(origin: string, home: string, extra: Record<string, string> = {}) {
+  return makeDeps({
+    origin,
+    home,
+    stdinIsTTY: false,
+    envExtra: {
+      CLEANSLOP_LINK_CLI: FAKE_LINK_CLI,
+      CLEANSLOP_TOKEN: TEST_TOKEN,
+      CLEANSLOP_STRIPE_PROFILE_ID: "profile_test",
+      ...extra,
+    },
+  });
+}
+
+test("credits buy waits through Link 3D Secure on the same spend request", async () => {
+  const fake = await startFakeServer((state) => {
+    state.purchaseResult = { ok: true };
+  });
+  cleanups.push(fake.close);
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0, polls: 0 }));
+  process.env.FAKE_LINK_MODE = "spend-auto-resume";
+  process.env.FAKE_LINK_STATE = statePath;
+  process.env.FAKE_RESUME_POLLS = "3";
+  const { deps, cap } = linkBuyDeps(fake.origin, home);
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], deps), 0, cap.err());
+  const err = cap.err();
+  assert.equal(err.match(/complete Link's verification/g)?.length, 1);
+  assert.match(err, /Complete 3DS in Link\. Link: https:\/\/hooks\.stripe\.com\/3d_secure\/test/);
+  assert.match(cap.out(), /Added p5 scan credits/);
+  assert.deepEqual(
+    fake.state.spendEvents.map((e) => e.event),
+    ["created", "requires_action", "approved"]
+  );
+  const state = readState(statePath) as { creates: number; lastExpiresAt?: string | null };
+  assert.equal(state.creates, 1);
+  // Packs expire about 3 hours after creation (the fake clock starts at 1_000_000 ms).
+  assert.equal(state.lastExpiresAt, "1970-01-01T03:21:40Z");
+  assert.equal(deps.fs.exists(pendingSpendPath(deps)), false);
+});
+
+test("credits buy retries once with Link's default expiry when Link refuses --expires-at", async () => {
+  const fake = await startFakeServer((state) => {
+    state.purchaseResult = { ok: true };
+  });
+  cleanups.push(fake.close);
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0 }));
+  process.env.FAKE_LINK_MODE = "expiry-rejected";
+  process.env.FAKE_LINK_STATE = statePath;
+  const { deps, cap } = linkBuyDeps(fake.origin, home);
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], deps), 0, cap.err());
+  const state = readState(statePath) as {
+    creates: number;
+    lastExpiresAt?: string | null;
+    createKeys?: string[];
+  };
+  assert.equal(state.creates, 1);
+  assert.equal(state.lastExpiresAt, null);
+  // The retry is a new logical request, so it gets its own key.
+  assert.deepEqual(state.createKeys, ["idem-test-1", "idem-test-1-default-expiry"]);
+  assert.doesNotMatch(cap.err(), /expires_at/);
+});
+
+test("an unclear create failure that mentions expires_at is not retried", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0 }));
+  process.env.FAKE_LINK_MODE = "expiry-unclear";
+  process.env.FAKE_LINK_STATE = statePath;
+  const { deps, cap } = linkBuyDeps(fake.origin, home);
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], deps), 10);
+  assert.match(cap.err(), /timed out/);
+  // It may have reached Link: never create a second request with a new key.
+  assert.deepEqual((readState(statePath) as { createKeys?: string[] }).createKeys, ["idem-test-1"]);
+});
+
+test("credits buy --resume keeps a request that is still being verified", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0, polls: 0 }));
+  process.env.FAKE_LINK_MODE = "spend-auto-resume";
+  process.env.FAKE_LINK_STATE = statePath;
+  process.env.FAKE_RESUME_POLLS = "100000";
+  const first = linkBuyDeps(fake.origin, home);
+  assert.equal(
+    await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], first.deps),
+    10,
+    first.cap.err()
+  );
+  const resumed = linkBuyDeps(fake.origin, home);
+  assert.equal(await runCli(["credits", "buy", "--link", "--resume"], resumed.deps), 10);
+  const err = resumed.cap.err();
+  assert.match(err, /waiting for verification/);
+  assert.match(err, /Do not start a new purchase: this one resumes on its own/);
+  const question = questionFrom(err);
+  assert.equal(question?.id, "link_payment_verification");
+  assert.match(question?.question ?? "", /https:\/\/hooks\.stripe\.com\/3d_secure\/test/);
+  assert.equal(resumed.deps.fs.exists(pendingSpendPath(resumed.deps)), true);
+  assert.equal(readState(statePath).creates, 1);
+  assert.equal(
+    fake.state.spendEvents.filter((e) => e.event === "requires_action").length,
+    1
+  );
+});
+
+test("credits buy stops on a failed spend request, says why, and offers a new one", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0 }));
+  process.env.FAKE_LINK_MODE = "ok";
+  process.env.FAKE_LINK_STATE = statePath;
+  process.env.FAKE_SPEND_STATUS = "failed";
+  process.env.FAKE_FAILED_RESOLUTION = "create_new_spend_request";
+  const { deps, cap } = linkBuyDeps(fake.origin, home);
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], deps), 10);
+  const err = cap.err();
+  assert.match(err, /Your card was declined\. Update it in Link\. Link: https:\/\/app\.link\.com\/wallet/);
+  assert.match(err, /The Link payment was not completed/);
+  const question = questionFrom(err);
+  assert.equal(question?.id, "link_payment_retry");
+  // A question tool may show only the question: Link's reason and link are in it.
+  assert.match(question?.question ?? "", /^Your card was declined\. Update it in Link\. Link: https:\/\/app\.link\.com\/wallet The Link payment for p5 was not completed\. Try again/);
+  assert.equal(question?.options[0]?.run, "cleanslop credits buy --link --pack p5 --no-wait");
+  assert.equal(deps.fs.exists(pendingSpendPath(deps)), false);
+  assert.deepEqual(fake.state.spendEvents.map((e) => e.event), ["created", "failed"]);
+  // Link's code reaches the billing Slack report.
+  assert.equal(fake.state.spendEvents[1]?.failureCode, "card_declined");
+  assert.equal((readState(statePath) as { nextActionRetrieves?: number }).nextActionRetrieves, 1);
+});
+
+test("a failed request with no message falls back to its code and offers Try again", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  process.env.FAKE_LINK_MODE = "ok";
+  process.env.FAKE_SPEND_STATUS = "failed";
+  process.env.FAKE_NO_ACTION = "1";
+  process.env.FAKE_LINK_STATE = join(tempHome(), "state.json");
+  const { deps, cap } = linkBuyDeps(fake.origin, tempHome());
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], deps), 10);
+  assert.match(cap.err(), /Link could not complete this payment \(card_declined\)\. The Link payment was not completed/);
+  assert.match(cap.err(), /The Link spend request failed\.\n$/);
+  assert.equal(questionFrom(cap.err())?.id, "link_payment_retry");
+});
+
+test("a step to finish first gets a Done question that starts the new payment only after it", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  process.env.FAKE_LINK_MODE = "ok";
+  process.env.FAKE_SPEND_STATUS = "failed";
+  process.env.FAKE_PAYMENT_DECLINE = "insufficient_funds";
+  process.env.FAKE_FAILED_CODE = "";
+  const home = tempHome();
+  process.env.FAKE_LINK_STATE = join(home, "state.json");
+  const { deps, cap } = linkBuyDeps(fake.origin, home);
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], deps), 10);
+  const err = cap.err();
+  assert.match(err, /Ask the human to finish that in Link first; nothing was charged\. After they finish, run `cleanslop credits buy --link --pack p5 --no-wait`/);
+  const question = questionFrom(err);
+  assert.equal(question?.id, "link_payment_step");
+  assert.equal(
+    question?.question,
+    "Your card was declined. Update it in Link. Link: https://app.link.com/wallet Then CleanSlop starts a new payment for the CleanSlop credit pack (p5). Done?"
+  );
+  assert.deepEqual(
+    question?.options.map((o) => [o.label, o.run]),
+    [["Done", "cleanslop credits buy --link --pack p5 --no-wait"], ["Not now", undefined]]
+  );
+  assert.equal(deps.fs.exists(pendingSpendPath(deps)), false);
+  // No status_details code: the payment's decline code is the reason.
+  assert.equal(fake.state.spendEvents.at(-1)?.failureCode, "insufficient_funds");
+  // One request only: nothing new starts until the human says Done.
+  assert.equal((JSON.parse(readFileSync(join(home, "state.json"), "utf8")) as { creates: number }).creates, 1);
+});
+
+test("spend-request checks take Link's --next-action and ignore its failures", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  process.env.FAKE_SPEND_STATUS = "failed";
+
+  process.env.FAKE_LINK_MODE = "spend-next-action-only";
+  const only = linkBuyDeps(fake.origin, tempHome());
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], only.deps), 10);
+  assert.match(only.cap.err(), /From --next-action\. Link: https:\/\/app\.link\.com\/wallet/);
+
+  process.env.FAKE_LINK_MODE = "next-action-fail";
+  const broken = linkBuyDeps(fake.origin, tempHome());
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], broken.deps), 10);
+  assert.match(broken.cap.err(), /Your card was declined/);
+  assert.doesNotMatch(broken.cap.err(), /Unknown flag/);
+});
+
+test("CLEANSLOP_LINK_AUTO_APPROVE approves test-mode spend requests only", async () => {
+  const fake = await startFakeServer((state) => {
+    state.purchaseResult = { ok: true };
+  });
+  cleanups.push(fake.close);
+  process.env.FAKE_LINK_MODE = "ok";
+  process.env.FAKE_SPEND_STATUS = "pending_approval";
+  const testProfile = {
+    CLEANSLOP_STRIPE_PROFILE_ID: "profile_test_sandbox",
+    CLEANSLOP_LINK_AUTO_APPROVE: "1",
+  };
+  const approvals = (path: string) =>
+    (JSON.parse(readFileSync(path, "utf8")) as { testApprovals?: number }).testApprovals ?? 0;
+
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  process.env.FAKE_LINK_STATE = statePath;
+  const auto = linkBuyDeps(fake.origin, home, testProfile);
+  assert.equal(
+    await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], auto.deps),
+    0,
+    auto.cap.err()
+  );
+  assert.doesNotMatch(auto.cap.err(), /CLEANSLOP_ACTION_REQUIRED/);
+  assert.match(auto.cap.out(), /Added p5 scan credits/);
+  assert.equal(approvals(statePath), 1);
+
+  // Live requests are never auto-approved, and only an exact "1" turns it on.
+  for (const extra of [
+    { CLEANSLOP_LINK_AUTO_APPROVE: "1" },
+    { ...testProfile, CLEANSLOP_LINK_AUTO_APPROVE: "true" },
+  ]) {
+    const path = join(tempHome(), "state.json");
+    process.env.FAKE_LINK_STATE = path;
+    const run = linkBuyDeps(fake.origin, tempHome(), extra);
+    assert.equal(
+      await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], run.deps),
+      10
+    );
+    assert.equal(approvals(path), 0);
+  }
+
+  // A helper failure warns and falls back to the normal approval.
+  process.env.FAKE_LINK_MODE = "test-approve-fail";
+  process.env.FAKE_LINK_STATE = join(tempHome(), "state.json");
+  const failing = linkBuyDeps(fake.origin, tempHome(), testProfile);
+  assert.equal(
+    await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], failing.deps),
+    10
+  );
+  assert.match(
+    failing.cap.err(),
+    /CLEANSLOP_LINK_AUTO_APPROVE: Link test helper did not approve sr_test_1 \(Spend request is not a demo request\)/
+  );
+  assert.match(failing.cap.err(), /Link payment approval pending/);
+
+  // The helper's approval can lag; --no-wait still gets a short wait for it.
+  process.env.FAKE_LINK_MODE = "ok";
+  process.env.FAKE_APPROVE_LAG_POLLS = "3";
+  process.env.FAKE_LINK_STATE = join(tempHome(), "state.json");
+  const lagged = linkBuyDeps(fake.origin, tempHome(), testProfile);
+  assert.equal(
+    await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], lagged.deps),
+    0,
+    lagged.cap.err()
+  );
+  assert.doesNotMatch(lagged.cap.err(), /CLEANSLOP_ACTION_REQUIRED/);
+});
+
+/** Creates a pending pack request with `--no-wait`, then runs `--resume` with `env`. */
+async function resumeWith(env: Record<string, string>, extra: Record<string, string> = {}) {
+  const fake = await startFakeServer((state) => {
+    state.purchaseResult = { ok: true };
+  });
+  cleanups.push(fake.close);
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0, polls: 0 }));
+  process.env.FAKE_LINK_MODE = "ok";
+  process.env.FAKE_LINK_STATE = statePath;
+  process.env.FAKE_SPEND_STATUS = "pending_approval";
+  const first = linkBuyDeps(fake.origin, home, extra);
+  assert.equal(
+    await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], first.deps),
+    10,
+    first.cap.err()
+  );
+  Object.assign(process.env, env);
+  const resumed = linkBuyDeps(fake.origin, home, extra);
+  const code = await runCli(["credits", "buy", "--link", "--resume"], resumed.deps);
+  return { code, fake, statePath, ...resumed };
+}
+
+test("credits buy --resume on a payment Link already charged replays it and never pays again", async () => {
+  for (const status of ["submitted", "succeeded"]) {
+    const replay = await resumeWith({ FAKE_SPEND_STATUS: status, FAKE_SPT: "spt_used_token" });
+    assert.equal(replay.code, 0, replay.cap.err());
+    // The server looks up purchases by token, so this POST replays the original row.
+    assert.deepEqual(
+      replay.fake.state.purchases.map((p) => (p as { body?: { sharedPaymentToken?: string } }).body?.sharedPaymentToken),
+      ["spt_used_token"]
+    );
+    assert.match(replay.cap.out(), /Added p5 scan credits/);
+    assert.equal(replay.deps.fs.exists(pendingSpendPath(replay.deps)), false);
+    // One token check, not the token-not-ready retry loop.
+    assert.equal(readState(replay.statePath).includeRetrieves, 1);
+    assert.deepEqual(replay.fake.state.spendEvents.map((e) => e.event), ["created"]);
+  }
+
+  const used = await resumeWith({ FAKE_SPEND_STATUS: "succeeded", FAKE_USED_NO_SPT: "1" });
+  assert.equal(used.code, 0, used.cap.err());
+  assert.match(
+    used.cap.out(),
+    /already went through on an earlier run; nothing new was charged\. Check the scan balance with `cleanslop whoami`\.\n$/
+  );
+  assert.equal(used.fake.state.purchases.length, 0);
+  assert.equal(used.deps.fs.exists(pendingSpendPath(used.deps)), false);
+  assert.doesNotMatch(used.cap.err(), /token is not ready/);
+
+  // Submitted is still processing: don't claim it went through.
+  const processing = await resumeWith({ FAKE_SPEND_STATUS: "submitted", FAKE_USED_NO_SPT: "1" });
+  assert.equal(processing.code, 0, processing.cap.err());
+  assert.match(
+    processing.cap.out(),
+    /was already submitted on an earlier run and is still processing; nothing new was charged\. Check the scan balance with `cleanslop whoami` in a minute\./
+  );
+  assert.doesNotMatch(processing.cap.out(), /went through/);
+  assert.equal(processing.fake.state.purchases.length, 0);
+});
+
+test("requires_action with no action shown keeps the request and keeps checking", async () => {
+  const run = await resumeWith({ FAKE_SPEND_STATUS: "requires_action", FAKE_NO_ACTION: "1" });
+  assert.equal(run.code, 10);
+  assert.match(run.cap.err(), /Link needs one more step for this payment; check the Link app/);
+  assert.equal(questionFrom(run.cap.err())?.id, "link_payment_verification");
+  assert.equal(run.deps.fs.exists(pendingSpendPath(run.deps)), true);
+  assert.equal(readState(run.statePath).creates, 1);
+
+  // An unknown resolution is treated the same way.
+  const unknown = await resumeWith({ FAKE_SPEND_STATUS: "requires_action", FAKE_SPEND_RESOLUTION: "brand_new_resolution" });
+  assert.equal(unknown.code, 10);
+  assert.equal(questionFrom(unknown.cap.err())?.id, "link_payment_verification");
+  assert.equal(unknown.deps.fs.exists(pendingSpendPath(unknown.deps)), true);
+});
+
+test("3D Secure is read from status_details or from --next-action alone", async () => {
+  // Only status_details carries it: --next-action prints [{"next_action": null}].
+  const details = await resumeWith({
+    FAKE_SPEND_STATUS: "requires_action",
+    FAKE_SPEND_RESOLUTION: "auto_resume",
+    FAKE_NEXT_ACTION_EMPTY: "1",
+  });
+  assert.equal(details.code, 10);
+  assert.match(details.cap.err(), /Complete 3DS in Link\. Link: https:\/\/hooks\.stripe\.com\/3d_secure\/test/);
+  assert.equal(details.deps.fs.exists(pendingSpendPath(details.deps)), true);
+
+  // Only --next-action carries it.
+  delete process.env.FAKE_NEXT_ACTION_EMPTY;
+  const snapshot = await resumeWith({
+    FAKE_LINK_MODE: "spend-next-action-only",
+    FAKE_SPEND_STATUS: "requires_action",
+    FAKE_SPEND_RESOLUTION: "auto_resume",
+  });
+  assert.equal(snapshot.code, 10);
+  assert.match(snapshot.cap.err(), /From --next-action\. Link: https:\/\/hooks\.stripe\.com\/3d_secure\/test/);
+  assert.equal(snapshot.deps.fs.exists(pendingSpendPath(snapshot.deps)), true);
+});
+
+test("a test-mode retrieve 404 reads the action through list and --next-action", async () => {
+  const run = await resumeWith(
+    {
+      FAKE_LINK_MODE: "spend-retrieve-not-found",
+      FAKE_SPEND_STATUS: "requires_action",
+      FAKE_SPEND_RESOLUTION: "auto_resume",
+    },
+    { CLEANSLOP_STRIPE_PROFILE_ID: "profile_test_sandbox" }
+  );
+  assert.equal(run.code, 10);
+  assert.equal(questionFrom(run.cap.err())?.id, "link_payment_verification");
+  assert.match(run.cap.err(), /Complete 3DS in Link/);
+  assert.equal(run.deps.fs.exists(pendingSpendPath(run.deps)), true);
+});
+
+test("verification is shown again when Link changes what it asks for", async () => {
+  const fake = await startFakeServer((state) => {
+    state.purchaseResult = { ok: true };
+  });
+  cleanups.push(fake.close);
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0, polls: 0 }));
+  process.env.FAKE_LINK_MODE = "spend-auto-resume";
+  process.env.FAKE_LINK_STATE = statePath;
+  process.env.FAKE_RESUME_POLLS = "4";
+  process.env.FAKE_ACTION_CHANGES_AT = "2";
+  const { deps, cap } = linkBuyDeps(fake.origin, home);
+  assert.equal(await runCli(["credits", "buy", "--link", "--amount", "1000"], deps), 0, cap.err());
+  const err = cap.err();
+  assert.equal(err.match(/complete Link's verification/g)?.length, 2);
+  assert.match(err, /Complete 3DS in Link\./);
+  assert.match(err, /Confirm the card in your bank app\./);
+  assert.equal(fake.state.spendEvents.filter((e) => e.event === "requires_action").length, 1);
+});
+
+test("credits buy --no-wait acts on an action or failure Link returns at creation", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  process.env.FAKE_LINK_MODE = "ok";
+
+  process.env.FAKE_CREATE_STATUS = "requires_action";
+  process.env.FAKE_SPEND_RESOLUTION = "auto_resume";
+  process.env.FAKE_LINK_STATE = join(tempHome(), "state.json");
+  const verify = linkBuyDeps(fake.origin, tempHome());
+  assert.equal(
+    await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], verify.deps),
+    10
+  );
+  assert.doesNotMatch(verify.cap.err(), /approve this CleanSlop credit pack/);
+  assert.equal(questionFrom(verify.cap.err())?.id, "link_payment_verification");
+  assert.equal(verify.deps.fs.exists(pendingSpendPath(verify.deps)), true);
+
+  process.env.FAKE_CREATE_STATUS = "failed";
+  process.env.FAKE_LINK_STATE = join(tempHome(), "state.json");
+  const failed = linkBuyDeps(fake.origin, tempHome());
+  assert.equal(
+    await runCli(["credits", "buy", "--link", "--amount", "1000", "--no-wait"], failed.deps),
+    10
+  );
+  assert.doesNotMatch(failed.cap.err(), /approve this CleanSlop credit pack/);
+  assert.equal(questionFrom(failed.cap.err())?.id, "link_payment_step");
+  assert.equal(failed.deps.fs.exists(pendingSpendPath(failed.deps)), false);
+});
+
+type SimulatedScenario = {
+  id: string;
+  resolution: string | null;
+  url_kind: string;
+  /** `error_next_action`: Link sends it in an HTTP error, never on a spend request. */
+  source_envelope: string;
+  next_action: {
+    type?: string | null;
+    resolution?: string;
+    display_message?: string;
+    action_url?: string | null;
+  } | null;
+};
+
+/** Stripe's `spend-request simulate` samples; refresh with scripts/link-simulation-fixtures.mjs. */
+const SIMULATION = JSON.parse(
+  readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "fixtures", "link-simulation.json"),
+    "utf8"
+  )
+) as { link_cli: string; scenarios: SimulatedScenario[] };
+
+const ERROR_ENVELOPE = "error_next_action";
+/** The samples Link returns on a spend request (status_details or --next-action). */
+const SPEND_REQUEST_SAMPLES = SIMULATION.scenarios.filter(
+  (s) => s.source_envelope !== ERROR_ENVELOPE
+);
+
+test("the saved Link samples come from the pinned link-cli and cover every spend-request resolution", () => {
+  assert.equal(`@stripe/link-cli@${SIMULATION.link_cli}`, LINK_CLI_PACKAGE);
+  const resolutions = new Set(SPEND_REQUEST_SAMPLES.map((s) => s.resolution));
+  assert.deepEqual(
+    [...resolutions].sort(),
+    [
+      "auto_resume",
+      "create_new_spend_request",
+      "create_new_spend_request_after_completion",
+      null,
+    ].sort()
+  );
+});
+
+test("Link's error-only samples need delegated approval, which spend-request create never asks for", async () => {
+  // Link sends these only from its delegated endpoints (link-cli --approve /
+  // --use-approval-policy). Adopting either means handling them first.
+  assert.deepEqual(
+    SIMULATION.scenarios
+      .filter((s) => s.source_envelope === ERROR_ENVELOPE)
+      .map((s) => s.id)
+      .sort(),
+    ["reauthorize_additional_scope", "retry_without_delegated_approval"]
+  );
+  let createArgs: string[] = [];
+  const { deps } = makeDeps({
+    origin: "https://app.example",
+    home: tempHome(),
+    execFile: async (_file, args) => {
+      if (args.length === 1 && args[0] === "--version") {
+        return { ok: true, stdout: "1.3.0\n", stderr: "", code: 0 };
+      }
+      createArgs = args;
+      return {
+        ok: true,
+        stdout: JSON.stringify([{ id: "sr_flags", status: "pending_approval" }]),
+        stderr: "",
+        code: 0,
+      };
+    },
+  });
+  await createLinkSpendRequest(deps, {
+    networkId: "profile_test",
+    amount: 1000,
+    currency: "usd",
+    context: "x".repeat(100),
+    lineItem: "name:CleanSlop 5 scan credits,unit_amount:1000,quantity:1",
+    total: "type:total,display_text:Total,amount:1000",
+    idempotencyKey: "idem-flags",
+    testMode: false,
+  });
+  assert.ok(createArgs.includes("create"));
+  assert.ok(createArgs.includes("--request-approval"));
+  assert.ok(!createArgs.includes("--approve"));
+  assert.ok(!createArgs.includes("--use-approval-policy"));
+});
+
+/** `credits buy --resume` on a saved request whose action is Link's sample. */
+async function resumeSample(origin: string, nextAction: SimulatedScenario["next_action"]) {
+  const home = tempHome();
+  const statePath = join(home, "fake-link-state.json");
+  writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0, polls: 0 }));
+  process.env.FAKE_LINK_MODE = "ok";
+  process.env.FAKE_LINK_STATE = statePath;
+  process.env.FAKE_SPEND_STATUS = "requires_action";
+  process.env.FAKE_NEXT_ACTION_JSON = JSON.stringify(nextAction);
+  const run = linkBuyDeps(origin, home);
+  await writePendingSpend(run.deps, {
+    version: 1,
+    origin,
+    spendRequestId: "sr_test_1",
+    pack: "p5",
+    amount: 1000,
+    currency: "usd",
+    networkId: "profile_test",
+    purchaseUrl: `${origin}/api/agent/v1/credits/purchases`,
+    createdAt: 1,
+  });
+  const code = await runCli(["credits", "buy", "--link", "--resume"], run.deps);
+  return { code, statePath, ...run };
+}
+
+test("every Link spend-request sample parses to its type, resolution, message and link", () => {
+  for (const scenario of SPEND_REQUEST_SAMPLES) {
+    const next = scenario.next_action;
+    const parsed = parseNextAction(next);
+    if (!next) {
+      assert.equal(parsed, null, scenario.id);
+      continue;
+    }
+    assert.deepEqual(
+      parsed,
+      {
+        resolution: scenario.resolution,
+        type: next.type ?? null,
+        displayMessage: next.display_message ?? null,
+        actionUrl: next.action_url ?? null,
+      },
+      scenario.id
+    );
+    assert.equal(parsed?.actionUrl !== null, scenario.url_kind === "present", scenario.id);
+  }
+});
+
+test("a Link sample of each resolution, with and without a link, ends or keeps the request as Link says", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  // One per resolution and url_kind: each run polls for the whole resume wait.
+  const seen = new Set<string>();
+  const samples = SPEND_REQUEST_SAMPLES.filter((s) => {
+    const key = `${s.resolution}/${s.url_kind}`;
+    return !seen.has(key) && seen.add(key);
+  });
+  assert.ok(samples.length >= 6);
+  for (const scenario of samples) {
+    const run = await resumeSample(fake.origin, scenario.next_action);
+    const err = run.cap.err();
+    const label = `${scenario.id}: ${err}`;
+    const question = questionFrom(err);
+    const kept = run.deps.fs.exists(pendingSpendPath(run.deps));
+    assert.equal(run.code, 10, label);
+    // Nothing new starts until the human answers.
+    assert.equal(readState(run.statePath).creates, 0, label);
+    const next = scenario.next_action;
+    switch (scenario.resolution) {
+      case "auto_resume":
+      case null:
+        assert.equal(question?.id, "link_payment_verification", label);
+        assert.equal(kept, true, label);
+        if (next?.display_message) assert.ok(err.includes(next.display_message), label);
+        if (next?.action_url) assert.ok(question?.question.includes(next.action_url), label);
+        break;
+      case "create_new_spend_request":
+        assert.equal(question?.id, "link_payment_retry", label);
+        assert.equal(kept, false, label);
+        assert.ok(next?.display_message && question?.question.includes(next.display_message), label);
+        break;
+      case "create_new_spend_request_after_completion":
+        assert.equal(question?.id, "link_payment_step", label);
+        assert.equal(kept, false, label);
+        assert.ok(next?.display_message && question?.question.includes(next.display_message), label);
+        if (next?.action_url) assert.ok(question?.question.includes(next.action_url), label);
+        break;
+      default:
+        assert.fail(`Unknown resolution in ${scenario.id}: ${String(scenario.resolution)}`);
+    }
+  }
 });

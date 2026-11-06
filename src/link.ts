@@ -1,10 +1,13 @@
+import { posix, resolve, win32 } from "node:path";
 import { writeAction } from "./action.js";
 import {
   CLIENT_ID,
+  LINK_CLI_MIN_VERSION,
   LINK_CLI_NPX_TIMEOUT_MS,
   LINK_CLI_PACKAGE,
   LINK_CLI_TIMEOUT_MS,
 } from "./config.js";
+import { configDir } from "./credentials.js";
 import type { CliDeps, GitResult } from "./deps.js";
 import { doneQuestion, RERUN_SAME_COMMAND, RESUME_SAME_COMMAND } from "./done-question.js";
 import {
@@ -12,11 +15,12 @@ import {
   CliError,
   EXIT_ACTION,
   EXIT_UNEXPECTED,
+  EXIT_USAGE,
   usageError,
   type ActionQuestion,
   type ActionRequired,
 } from "./exit.js";
-import { detectAgentHint } from "./git.js";
+import { detectAgentHint, gitToplevel, isPathInsideWorktree } from "./git.js";
 import { asRecord } from "./http.js";
 import { redactSecrets } from "./redact.js";
 import type { ParsedArgs } from "./types.js";
@@ -33,8 +37,8 @@ const LINK_AUTH_CLIENT_NAME = "CleanSlop";
  */
 export const LINK_PAYMENT_SCOPE = "payment_methods.agentic";
 /**
- * link-cli 0.27 defaults to `userinfo:read payment_methods.agentic` when
- * `--scope` is omitted. Login must pass a non-empty non-payment scope.
+ * link-cli defaults to `userinfo:read payment_methods.agentic` when `--scope`
+ * is omitted. Login must pass a non-empty non-payment scope.
  * Email still comes from the identity presentation; we never call
  * `user-info retrieve`.
  */
@@ -50,6 +54,20 @@ const LINK_AUTH_WAIT_MS = 5 * 60_000;
 const LINK_ATTESTATION_BATCH = "10";
 const EMPTY_POOL_PATTERN = /pool is empty|ATTESTATION_POOL_EMPTY|no attestation/i;
 const MISSING_SCOPE_PATTERN = /missing required scopes/i;
+/** link-cli's own check: nothing reached Link. */
+const EXPIRY_INPUT_INVALID = /Expiry must be Unix seconds or an ISO 8601 timestamp/i;
+/** A validation refusal from Link (400 / invalid request), not a timeout or 5xx. */
+const VALIDATION_REFUSAL = /\(400\)|"status"\s*:\s*400|\bINVALID_(?:INPUT|ARGUMENT)\b|invalid_request_error/;
+
+/**
+ * Only a definite refusal of `--expires-at` may retry with a new idempotency
+ * key: an unclear failure might have created the request already.
+ */
+function isExpiryRejected(result: GitResult): boolean {
+  const text = `${result.stderr} ${result.stdout}`;
+  if (EXPIRY_INPUT_INVALID.test(text)) return true;
+  return VALIDATION_REFUSAL.test(text) && /\bexpires_at\b/i.test(text);
+}
 const RENEW_CREDENTIAL_PATTERN =
   /no saved identity credential|identity credential has expired|no credential|not found|empty/i;
 
@@ -68,65 +86,214 @@ export type LinkClaimsChallenge = {
   interactionId: string;
 };
 
-function linkEnv(deps: CliDeps): NodeJS.ProcessEnv {
+/**
+ * `PATH` comes from `linkCliRuntime`. Every other spelling (`Path` on
+ * Windows) is dropped so the filtered one is the only PATH the child sees.
+ */
+function linkEnv(path: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.toUpperCase() !== "PATH") env[key] = value;
+  }
   return {
-    ...process.env,
+    ...env,
+    PATH: path,
     LINK_IDENTITY_COMMANDS: "1",
     // link-cli's postinstall otherwise adds Stripe's payment skill to the
     // person's agent setup when the npx fallback installs it.
     LINK_CLI_SKIP_SKILL_INSTALL: "1",
-    PATH: deps.env.get("PATH") ?? process.env.PATH ?? "",
   };
 }
 
-type LinkCliCommand = { file: string; prefix: string[] };
+type LinkCliCommand = { file: string; prefix: string[]; npx?: true };
+
+/** Where every link-cli run happens, and the PATH it sees. Resolved once per run. */
+type LinkCliRuntime = { cwd: string; path: string };
+
+type ResolvedLinkCli =
+  | { cmd: LinkCliCommand; runtime: LinkCliRuntime }
+  /** `CLEANSLOP_LINK_CLI` is missing: every call returns this result (exit 127). */
+  | { missing: GitResult };
 
 const PATH_LINK_CLI: LinkCliCommand = { file: "link-cli", prefix: [] };
 const NPX_LINK_CLI: LinkCliCommand = {
   file: "npx",
   prefix: ["--yes", "--package", LINK_CLI_PACKAGE, "--", "link-cli"],
+  npx: true,
 };
 
 /** Per-run choice between `link-cli` on PATH and the pinned npx copy. */
-const resolvedLinkCli = new WeakMap<CliDeps, LinkCliCommand>();
+const resolvedLinkCli = new WeakMap<CliDeps, ResolvedLinkCli>();
+
+export type LinkCliVersion = { core: [number, number, number]; prerelease: boolean };
+
+/** The first `x.y.z[-pre]` in link-cli's `--version` output. */
+export function parseLinkCliVersion(text: string): LinkCliVersion | null {
+  const match = /(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?/.exec(text);
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] !== undefined,
+  };
+}
+
+/** Semver order for the core; `1.2.0-beta.1` sorts below `1.2.0`. */
+export function linkCliVersionAtLeast(text: string, min = LINK_CLI_MIN_VERSION): boolean {
+  const have = parseLinkCliVersion(text);
+  const want = parseLinkCliVersion(min);
+  if (!have || !want) return false;
+  for (let i = 0; i < 3; i++) {
+    if (have.core[i]! !== want.core[i]!) return have.core[i]! > want.core[i]!;
+  }
+  return !have.prerelease || want.prerelease;
+}
+
+function formatLinkCliVersion(text: string): string | null {
+  const match = /\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?/.exec(text);
+  return match ? match[0] : null;
+}
+
+/**
+ * The scanned repo must not choose which link-cli runs: `npx @cleanslop/cli`
+ * puts the project's `node_modules/.bin` (and its parents') on PATH, and any
+ * dependency can ship a `link-cli` bin. Drops every `node_modules/.bin` whose
+ * project is inside one of `roots` or contains it, and relative entries.
+ */
+export function linkCliSearchPath(
+  pathValue: string,
+  platform: NodeJS.Platform,
+  roots: string[]
+): string {
+  const windows = platform === "win32";
+  const paths = windows ? win32 : posix;
+  // Windows paths ignore case; POSIX ones resolve symlinks and fail closed.
+  const inside = windows
+    ? (child: string, parent: string) => {
+        const rel = win32.relative(parent.toLowerCase(), child.toLowerCase());
+        return rel === "" || (!rel.startsWith("..") && !win32.isAbsolute(rel));
+      }
+    : isPathInsideWorktree;
+  const binDir = windows ? /[\\/]node_modules[\\/]\.bin$/i : /\/node_modules\/\.bin$/;
+  return pathValue
+    .split(paths.delimiter)
+    .filter((entry) => {
+      if (!entry || !paths.isAbsolute(entry)) return false;
+      const dir = paths.normalize(entry).replace(/[\\/]+$/, "");
+      if (!binDir.test(dir)) return true;
+      const project = paths.dirname(paths.dirname(dir));
+      return !roots.some((root) => inside(project, root) || inside(root, project));
+    })
+    .join(paths.delimiter);
+}
+
+/**
+ * Not the repo, so npx ignores the project's `.npmrc` and local installs.
+ * link-cli keeps its session in the OS config folder whatever the cwd, so
+ * the person's own link-cli and ours share one session.
+ */
+function linkCliCwd(deps: CliDeps): string {
+  const dir = configDir(deps);
+  try {
+    deps.fs.mkdir(dir, 0o700);
+    return dir;
+  } catch {
+    return deps.env.homeDir();
+  }
+}
+
+async function linkCliRuntime(deps: CliDeps): Promise<LinkCliRuntime> {
+  const cwd = resolve(deps.env.cwd());
+  const top = await gitToplevel(deps, cwd).catch(() => null);
+  const roots = top && resolve(top) !== cwd ? [cwd, resolve(top)] : [cwd];
+  return {
+    cwd: linkCliCwd(deps),
+    path: linkCliSearchPath(
+      deps.env.get("PATH") ?? process.env.PATH ?? "",
+      deps.env.platform,
+      roots
+    ),
+  };
+}
 
 function execLinkCli(
   deps: CliDeps,
   cmd: LinkCliCommand,
+  runtime: LinkCliRuntime,
   args: string[],
-  timeout: number
+  timeout: number,
+  extraEnv: Record<string, string> = {}
 ): Promise<GitResult> {
   return deps.execFile(cmd.file, [...cmd.prefix, ...args], {
     // The first npx run downloads link-cli and its dependencies.
-    timeout: cmd === NPX_LINK_CLI ? Math.max(timeout, LINK_CLI_NPX_TIMEOUT_MS) : timeout,
-    env: linkEnv(deps),
+    timeout: cmd.npx ? Math.max(timeout, LINK_CLI_NPX_TIMEOUT_MS) : timeout,
+    cwd: runtime.cwd,
+    env: { ...linkEnv(runtime.path), ...extraEnv },
   });
 }
 
 /**
- * `CLEANSLOP_LINK_CLI`, else `link-cli` on PATH, else the pinned
+ * Link runs from the config folder, so a relative `CLEANSLOP_LINK_CLI`
+ * (`./bin/link-cli`) is resolved against the person's folder first. A bare
+ * name (`link-cli`) is still looked up on the filtered PATH.
+ */
+function linkCliOverride(deps: CliDeps): string | null {
+  const raw = deps.env.get("CLEANSLOP_LINK_CLI")?.trim();
+  if (!raw) return null;
+  const paths = deps.env.platform === "win32" ? win32 : posix;
+  if (paths.isAbsolute(raw) || !/[\\/]/.test(raw)) return raw;
+  return paths.resolve(deps.env.cwd(), raw);
+}
+
+/**
+ * `CLEANSLOP_LINK_CLI` (must be `LINK_CLI_MIN_VERSION` or later), else
+ * `link-cli` on PATH when it is new enough, else the pinned
  * `@stripe/link-cli` through npx, so `npx @cleanslop/cli` needs nothing else
  * installed.
  */
+async function resolveLinkCli(deps: CliDeps): Promise<ResolvedLinkCli> {
+  const known = resolvedLinkCli.get(deps);
+  if (known) return known;
+  const runtime = await linkCliRuntime(deps);
+  const override = linkCliOverride(deps);
+  let resolved: ResolvedLinkCli;
+  if (override) {
+    const cmd: LinkCliCommand = { file: override, prefix: [] };
+    const probe = await execLinkCli(deps, cmd, runtime, ["--version"], LINK_CLI_TIMEOUT_MS);
+    if (probe.code === 127) {
+      resolved = { missing: probe };
+    } else if (!probe.ok) {
+      const detail = redactSecrets((probe.stderr || probe.stdout || "").trim()).slice(0, 200);
+      throw new CliError(
+        `CLEANSLOP_LINK_CLI (${override}) did not answer \`--version\` (exit ${probe.code}${detail ? `: ${detail}` : ""}). CleanSlop needs link-cli ${LINK_CLI_MIN_VERSION} or later; fix it, or unset CLEANSLOP_LINK_CLI to use the bundled ${LINK_CLI_PACKAGE}.`,
+        EXIT_USAGE
+      );
+    } else if (!linkCliVersionAtLeast(probe.stdout)) {
+      const version = formatLinkCliVersion(probe.stdout);
+      throw new CliError(
+        `CLEANSLOP_LINK_CLI (${override}) is link-cli ${version ?? "of an unknown version"}; CleanSlop needs link-cli ${LINK_CLI_MIN_VERSION} or later. Update it, or unset CLEANSLOP_LINK_CLI to use the bundled ${LINK_CLI_PACKAGE}.`,
+        EXIT_USAGE
+      );
+    } else {
+      resolved = { cmd, runtime };
+    }
+  } else {
+    const probe = await execLinkCli(deps, PATH_LINK_CLI, runtime, ["--version"], LINK_CLI_TIMEOUT_MS);
+    const usePath = probe.ok && linkCliVersionAtLeast(probe.stdout);
+    resolved = { cmd: usePath ? PATH_LINK_CLI : NPX_LINK_CLI, runtime };
+  }
+  resolvedLinkCli.set(deps, resolved);
+  return resolved;
+}
+
 export async function runLinkCli(
   deps: CliDeps,
   args: string[],
-  opts: { timeout?: number } = {}
+  opts: { timeout?: number; env?: Record<string, string> } = {}
 ): Promise<GitResult> {
   const timeout = opts.timeout ?? LINK_CLI_TIMEOUT_MS;
-  const override = deps.env.get("CLEANSLOP_LINK_CLI")?.trim();
-  if (override) {
-    return execLinkCli(deps, { file: override, prefix: [] }, args, timeout);
-  }
-  const known = resolvedLinkCli.get(deps);
-  if (known) return execLinkCli(deps, known, args, timeout);
-  const onPath = await execLinkCli(deps, PATH_LINK_CLI, args, timeout);
-  if (onPath.code !== 127) {
-    resolvedLinkCli.set(deps, PATH_LINK_CLI);
-    return onPath;
-  }
-  resolvedLinkCli.set(deps, NPX_LINK_CLI);
-  return execLinkCli(deps, NPX_LINK_CLI, args, timeout);
+  const resolved = await resolveLinkCli(deps);
+  if ("missing" in resolved) return resolved.missing;
+  return execLinkCli(deps, resolved.cmd, resolved.runtime, args, timeout, opts.env);
 }
 
 function throwLinkCliFailure(result: GitResult, fallback: string): never {
@@ -296,6 +463,9 @@ async function completeLinkDeviceAuth(
       LINK_AUTH_CLIENT_NAME,
       "--scope",
       scope,
+      // link-cli 1.1+ login otherwise also asks for the person's balances and
+      // transactions. `upgrade` keeps the session's own and rejects the flag.
+      ...(kind === "login" ? ["--no-financial-insights"] : []),
       "--format",
       "json",
     ]);
@@ -662,13 +832,35 @@ export type SpendRequestStatus =
   | "expired"
   | "requires_action"
   | "canceled"
+  | "failed"
+  /** The merchant (CleanSlop) is charging the token, or already did. Never pay again. */
+  | "submitted"
+  | "succeeded"
   | "unknown";
+
+/** Link's `next_action`: what the human must do, and whether the request resumes after. */
+export type SpendRequestNextAction = {
+  /** `auto_resume`, `create_new_spend_request`, `create_new_spend_request_after_completion`. */
+  resolution: string | null;
+  /** e.g. `three_d_secure`, `partner_auth_challenge`, `add_payment_method`. */
+  type: string | null;
+  displayMessage: string | null;
+  actionUrl: string | null;
+};
 
 export type SpendRequestSnapshot = {
   id: string;
   status: SpendRequestStatus;
   displayMessage: string | null;
   resolution: string | null;
+  actionType: string | null;
+  actionUrl: string | null;
+  /**
+   * `status_details.failed.code`, else a failed payment's
+   * `payment_status_details.decline_code` / `code`, else
+   * `status_details.requires_action.failure_code`.
+   */
+  failureCode: string | null;
   sharedPaymentToken: string | null;
   approvalUrl: string | null;
 };
@@ -680,14 +872,75 @@ function spendRequestStatus(raw: string): SpendRequestStatus {
     case "created":
       return "pending";
     case "approved":
+    case "submitted":
+    case "succeeded":
     case "denied":
     case "expired":
     case "requires_action":
     case "canceled":
+    case "failed":
       return raw;
     default:
       return "unknown";
   }
+}
+
+function httpUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const url = value.trim();
+  return /^https?:\/\//i.test(url) ? url : null;
+}
+
+function nonEmpty(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** link-cli's `NextAction`; `resolution` was an object in older fixtures. */
+export function parseNextAction(value: unknown): SpendRequestNextAction | null {
+  const next = asRecord(value);
+  if (!next) return null;
+  const raw = next.resolution;
+  return {
+    resolution: nonEmpty(raw) ?? nonEmpty(asRecord(raw)?.type),
+    type: nonEmpty(next.type),
+    displayMessage: nonEmpty(next.display_message),
+    actionUrl: httpUrl(next.action_url),
+  };
+}
+
+/**
+ * link-cli puts the action under `status_details.<status>.next_action`, so the
+ * current status's entry wins over a stale one; the top-level `next_action`
+ * is only a fallback for other shapes.
+ */
+function nextActionOf(
+  json: Record<string, unknown>,
+  status: SpendRequestStatus
+): SpendRequestNextAction | null {
+  const details = asRecord(json.status_details);
+  const failed = parseNextAction(asRecord(details?.failed)?.next_action);
+  const action = parseNextAction(asRecord(details?.requires_action)?.next_action);
+  const ordered = status === "failed" ? [failed, action] : [action, failed];
+  return ordered[0] ?? ordered[1] ?? parseNextAction(json.next_action);
+}
+
+/** Codes only (`card_declined`): nothing free-form reaches Slack or the prompt. */
+const FAILURE_CODE_RE = /^[a-z0-9_.-]{1,64}$/i;
+
+function failureCode(value: unknown): string | null {
+  const code = nonEmpty(value);
+  return code && FAILURE_CODE_RE.test(code) ? code : null;
+}
+
+function failureCodeOf(json: Record<string, unknown>): string | null {
+  const details = asRecord(json.status_details);
+  const payment = asRecord(json.payment_status_details);
+  const declined = payment?.outcome === "failure";
+  return (
+    failureCode(asRecord(details?.failed)?.code) ??
+    (declined ? failureCode(payment?.decline_code) ?? failureCode(payment?.code) : null) ??
+    failureCode(asRecord(details?.requires_action)?.failure_code)
+  );
 }
 
 function extractApprovalUrl(json: Record<string, unknown>): string | null {
@@ -718,26 +971,53 @@ function snapshotFromSpendRecord(
   const status = spendRequestStatus(
     typeof json.status === "string" ? json.status : ""
   );
-  const next = asRecord(json.next_action);
-  const resolutionRaw = next?.resolution;
-  const resolution =
-    typeof resolutionRaw === "string"
-      ? resolutionRaw
-      : typeof asRecord(resolutionRaw)?.type === "string"
-        ? String(asRecord(resolutionRaw)?.type)
-        : null;
-  const displayMessage =
-    (typeof next?.display_message === "string" && next.display_message) ||
-    (typeof json.display_message === "string" && json.display_message) ||
-    null;
+  const next = nextActionOf(json, status);
   return {
     id,
     status,
-    displayMessage,
-    resolution,
+    displayMessage: next?.displayMessage ?? nonEmpty(json.display_message),
+    resolution: next?.resolution ?? null,
+    actionType: next?.type ?? null,
+    actionUrl: next?.actionUrl ?? null,
+    failureCode: failureCodeOf(json),
     sharedPaymentToken: extractSharedPaymentToken(json),
     approvalUrl: extractApprovalUrl(json),
   };
+}
+
+/** Link's own `next_action` replaces what the plain retrieve parsed. */
+function withNextAction(
+  snap: SpendRequestSnapshot,
+  next: SpendRequestNextAction
+): SpendRequestSnapshot {
+  return {
+    ...snap,
+    resolution: next.resolution ?? snap.resolution,
+    actionType: next.type ?? snap.actionType,
+    displayMessage: next.displayMessage ?? snap.displayMessage,
+    actionUrl: next.actionUrl ?? snap.actionUrl,
+  };
+}
+
+/**
+ * `spend-request retrieve <id> --next-action` (link-cli 1.2+): one snapshot of
+ * the request's current action, or null. Never polls or returns credentials.
+ */
+export async function retrieveLinkSpendRequestNextAction(
+  deps: CliDeps,
+  spendRequestId: string
+): Promise<SpendRequestNextAction | null> {
+  const result = await runLinkCli(deps, [
+    "spend-request",
+    "retrieve",
+    spendRequestId,
+    "--next-action",
+    "--format",
+    "json",
+  ]);
+  if (!result.ok) return null;
+  const json = parseLinkJson(result.stdout);
+  return parseNextAction(json?.next_action);
 }
 
 export function parseSpendRequestJson(stdout: string): SpendRequestSnapshot | null {
@@ -831,33 +1111,43 @@ export async function createLinkSpendRequest(
     testMode: boolean;
     /** Monthly plan: a recurring spend request (link-cli 0.29+). */
     recurringInterval?: "month";
+    /** ISO 8601 ending in `Z`, at least 3 hours ahead. Omitted: Link's default (7 days one-time). */
+    expiresAt?: string;
   }
 ): Promise<SpendRequestSnapshot> {
-  const result = await runLinkCli(deps, [
-    "spend-request",
-    "create",
-    "--credential-type",
-    "shared_payment_token",
-    "--network-id",
-    input.networkId,
-    "--amount",
-    String(input.amount),
-    "--currency",
-    input.currency,
-    "--context",
-    input.context,
-    "--line-item",
-    input.lineItem,
-    "--total",
-    input.total,
-    "--idempotency-key",
-    input.idempotencyKey,
-    ...(input.recurringInterval ? ["--recurring-interval", input.recurringInterval] : []),
-    "--request-approval",
-    ...(input.testMode ? ["--test"] : []),
-    "--format",
-    "json",
-  ]);
+  const create = (expiresAt: string | undefined, idempotencyKey: string) =>
+    runLinkCli(deps, [
+      "spend-request",
+      "create",
+      "--credential-type",
+      "shared_payment_token",
+      "--network-id",
+      input.networkId,
+      "--amount",
+      String(input.amount),
+      "--currency",
+      input.currency,
+      "--context",
+      input.context,
+      "--line-item",
+      input.lineItem,
+      "--total",
+      input.total,
+      "--idempotency-key",
+      idempotencyKey,
+      ...(input.recurringInterval ? ["--recurring-interval", input.recurringInterval] : []),
+      ...(expiresAt ? ["--expires-at", expiresAt] : []),
+      "--request-approval",
+      ...(input.testMode ? ["--test"] : []),
+      "--format",
+      "json",
+    ]);
+  let result = await create(input.expiresAt, input.idempotencyKey);
+  // The expiry is only a tighter limit: if Link refuses it (a country limit,
+  // clock skew), create once more with Link's default rather than fail the purchase.
+  if (!result.ok && input.expiresAt && isExpiryRejected(result)) {
+    result = await create(undefined, `${input.idempotencyKey}-default-expiry`);
+  }
   if (!result.ok) {
     throwLinkCliFailure(result, "Could not create a Link spend request.");
   }
@@ -903,7 +1193,7 @@ export async function retrieveLinkSpendRequest(
         EXIT_UNEXPECTED
       );
     }
-    return parsed;
+    return withCurrentAction(deps, parsed);
   }
   // link-cli 0.27 create --test writes a test-mode id; retrieve has no --test
   // and 404s in live. List still sees the request.
@@ -922,9 +1212,23 @@ export async function retrieveLinkSpendRequest(
         EXIT_UNEXPECTED
       );
     }
-    if (fromList) return fromList;
+    // `list` rows often carry no action details.
+    if (fromList) return withCurrentAction(deps, fromList);
   }
   throwLinkCliFailure(result, "Could not retrieve the Link spend request.");
+}
+
+/**
+ * On `requires_action` / `failed`, asks `--next-action` for the current action.
+ * A failure there keeps what the plain retrieve parsed.
+ */
+async function withCurrentAction(
+  deps: CliDeps,
+  snap: SpendRequestSnapshot
+): Promise<SpendRequestSnapshot> {
+  if (snap.status !== "requires_action" && snap.status !== "failed") return snap;
+  const next = await retrieveLinkSpendRequestNextAction(deps, snap.id).catch(() => null);
+  return next ? withNextAction(snap, next) : snap;
 }
 
 export async function retrieveSharedPaymentToken(
@@ -941,6 +1245,35 @@ export async function retrieveSharedPaymentToken(
     if (snap.sharedPaymentToken) return snap.sharedPaymentToken;
   }
   return null;
+}
+
+/** How long an auto-approved test request may take to read as approved. */
+export const AUTO_APPROVE_WAIT_MS = 30_000;
+
+/**
+ * Hidden team override for test mode: `CLEANSLOP_LINK_AUTO_APPROVE=1` (exact)
+ * approves a test-mode spend request right after it is created, through
+ * link-cli's `test-helpers spend-request approve`, so packs and plans run end
+ * to end without the Link app. Never touches live requests. A failure only
+ * warns; the normal approval wait follows.
+ */
+export async function autoApproveTestSpendRequest(
+  deps: CliDeps,
+  spendRequestId: string,
+  testMode: boolean
+): Promise<boolean> {
+  if (!testMode || deps.env.get("CLEANSLOP_LINK_AUTO_APPROVE")?.trim() !== "1") return false;
+  const result = await runLinkCli(
+    deps,
+    ["test-helpers", "spend-request", "approve", spendRequestId, "--format", "json"],
+    { env: { LINK_TEST_HELPERS: "1" } }
+  );
+  if (result.ok) return true;
+  const detail = redactSecrets((result.stderr || result.stdout || "").trim());
+  deps.io.stderr(
+    `CLEANSLOP_LINK_AUTO_APPROVE: Link test helper did not approve ${spendRequestId}${detail ? ` (${detail})` : ""}.\n`
+  );
+  return false;
 }
 
 /** Terms ride along only once the human agreed to them (a new account). */

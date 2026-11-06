@@ -20,7 +20,16 @@ const FAKE_LINK_CLI = join(dirname(fileURLToPath(import.meta.url)), "fake-link-c
 chmodSync(FAKE_LINK_CLI, 0o755);
 
 const cleanups: Array<() => Promise<void> | void> = [];
-const envKeys = ["FAKE_LINK_MODE", "FAKE_LINK_STATE", "FAKE_SPEND_STATUS", "FAKE_SPT"] as const;
+const envKeys = [
+  "FAKE_LINK_MODE",
+  "FAKE_LINK_STATE",
+  "FAKE_SPEND_STATUS",
+  "FAKE_SPT",
+  "FAKE_RESUME_POLLS",
+  "FAKE_FAILED_RESOLUTION",
+  "FAKE_CREATE_STATUS",
+  "FAKE_APPROVE_LAG_POLLS",
+] as const;
 
 afterEach(async () => {
   while (cleanups.length) await cleanups.pop()?.();
@@ -56,15 +65,23 @@ function linkState(home: string, mode = "ok") {
       creates: number;
       lastAmount?: string | null;
       lastRecurring?: string | null;
+      lastExpiresAt?: string | null;
+      testApprovals?: number;
     };
 }
 
-function runPlan(origin: string, home: string, argv: string[], stdinIsTTY = false) {
+function runPlan(
+  origin: string,
+  home: string,
+  argv: string[],
+  stdinIsTTY = false,
+  extra: Record<string, string> = {}
+) {
   const made = makeDeps({
     origin,
     home,
     stdinIsTTY,
-    envExtra: { CLEANSLOP_LINK_CLI: FAKE_LINK_CLI, CLEANSLOP_TOKEN: TEST_TOKEN },
+    envExtra: { CLEANSLOP_LINK_CLI: FAKE_LINK_CLI, CLEANSLOP_TOKEN: TEST_TOKEN, ...extra },
   });
   return runCli(["plan", ...argv], made.deps).then((code) => ({ code, ...made }));
 }
@@ -142,6 +159,8 @@ test("plan pro at a terminal creates a monthly spend request, waits, and starts 
   assert.equal(state.creates, 1);
   assert.equal(state.lastAmount, "4900");
   assert.equal(state.lastRecurring, "month");
+  // Renewals need the token, so plans keep Link's default expiry.
+  assert.equal(state.lastExpiresAt, null);
   assert.deepEqual(fake.state.planPurchases, [
     { plan: "pro", sharedPaymentToken: "spt_plan_token_xyz", spendRequestId: "sr_test_1" },
   ]);
@@ -348,6 +367,73 @@ test("plan restarts after a denial and resumes when the token is late", async ()
   assert.match(late.cap.err(), /Run `cleanslop plan --resume` — do not create a new spend request/);
   assert.equal(late.deps.fs.exists(pendingSpendPath(late.deps, "plan")), true);
   assert.ok(fake.state.spendEvents.some((e) => e.event === "token_missing" && e.pack === "pro"));
+});
+
+test("plan waits through Link verification and stops on a failed approval", async () => {
+  const fake = await planServer();
+  const home = tempHome();
+  const read = linkState(home, "spend-auto-resume");
+  const verified = await runPlan(fake.origin, home, ["pro"], true);
+  assert.equal(verified.code, 0, verified.cap.err());
+  assert.match(verified.cap.err(), /complete Link's verification for this CleanSlop Pro plan/);
+  assert.match(verified.cap.out(), /Started the CleanSlop Pro plan/);
+  assert.equal(read().creates, 1);
+
+  const failedHome = tempHome();
+  linkState(failedHome);
+  process.env.FAKE_SPEND_STATUS = "failed";
+  process.env.FAKE_FAILED_RESOLUTION = "create_new_spend_request";
+  const failed = await runPlan(fake.origin, failedHome, ["pro"], true);
+  assert.equal(failed.code, 10);
+  assert.match(failed.cap.err(), /Your card was declined/);
+  assert.match(failed.cap.err(), /The Link approval was not completed/);
+  assert.equal(questionFrom(failed.cap.err())?.id, "link_plan_retry");
+  assert.equal(failed.deps.fs.exists(pendingSpendPath(failed.deps, "plan")), false);
+  assert.ok(fake.state.spendEvents.some((e) => e.event === "failed" && e.pack === "pro"));
+
+  // A step to finish first: Done starts the new plan request.
+  delete process.env.FAKE_FAILED_RESOLUTION;
+  const stepHome = tempHome();
+  linkState(stepHome);
+  const step = await runPlan(fake.origin, stepHome, ["pro"], true);
+  assert.equal(step.code, 10);
+  const question = questionFrom(step.cap.err());
+  assert.equal(question?.id, "link_payment_step");
+  assert.match(question?.question ?? "", /Then CleanSlop starts a new payment for the CleanSlop Pro plan\. Done\?$/);
+  assert.equal(question?.options[0]?.run, "cleanslop plan pro --no-wait");
+});
+
+test("plan --resume on a plan Link already charged replays it and never pays again", async () => {
+  const fake = await planServer();
+  const home = tempHome();
+  linkState(home);
+  process.env.FAKE_SPEND_STATUS = "pending_approval";
+  const first = await runPlan(fake.origin, home, ["pro", "--no-wait"]);
+  assert.equal(first.code, 10, first.cap.err());
+
+  // The token is still readable: POST replays the original subscription (the server looks up by token).
+  process.env.FAKE_SPEND_STATUS = "succeeded";
+  process.env.FAKE_SPT = "spt_used_plan";
+  const replay = await runPlan(fake.origin, home, ["--resume"]);
+  assert.equal(replay.code, 0, replay.cap.err());
+  assert.match(replay.cap.out(), /Started the CleanSlop Pro plan/);
+  assert.deepEqual(fake.state.planPurchases.map((p) => (p as { sharedPaymentToken: string }).sharedPaymentToken), ["spt_used_plan"]);
+  assert.equal(replay.deps.fs.exists(pendingSpendPath(replay.deps, "plan")), false);
+});
+
+test("plan --no-wait with CLEANSLOP_LINK_AUTO_APPROVE starts a test-mode plan without the Link app", async () => {
+  const fake = await planServer();
+  const home = tempHome();
+  const read = linkState(home);
+  process.env.FAKE_SPEND_STATUS = "pending_approval";
+  const auto = await runPlan(fake.origin, home, ["pro", "--no-wait"], false, {
+    CLEANSLOP_STRIPE_PROFILE_ID: "profile_test_sandbox",
+    CLEANSLOP_LINK_AUTO_APPROVE: "1",
+  });
+  assert.equal(auto.code, 0, auto.cap.err());
+  assert.doesNotMatch(auto.cap.err(), /CLEANSLOP_ACTION_REQUIRED/);
+  assert.match(auto.cap.out(), /Started the CleanSlop Pro plan/);
+  assert.equal(read().testApprovals, 1);
 });
 
 test("logout drops a saved plan request with the pack one", async () => {
