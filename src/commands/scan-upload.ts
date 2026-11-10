@@ -8,7 +8,7 @@ import type { CliDeps, HttpResult } from "../deps.js";
 import { CliError, EXIT_OK, EXIT_RUNNING, EXIT_SCAN_FAILED, EXIT_UNEXPECTED } from "../exit.js";
 import { recoverOutOfScansIfOffered } from "./credits.js";
 import { httpRequest, requireOk } from "../http.js";
-import { writeJson, writeScanProgress } from "../output.js";
+import { writeCreditsReserved, writeJson, writeScanMode, writeScanProgress } from "../output.js";
 import { writeReport } from "../report-question.js";
 import {
   formatPackSummary,
@@ -45,6 +45,8 @@ export async function runUploadScan(
   const scan0 = payload.scan;
   await storeLastScanId(deps, origin, scan0.id);
   writeScanProgress(deps, scan0);
+  writeCreditsReserved(deps, payload);
+  writeScanMode(deps, payload);
 
   let scan = scan0;
   if (!isScanFinal(scan) && args.wait) {
@@ -129,6 +131,8 @@ async function uploadAndStart(
   const startBody = {
     uploadId: rec.uploadId,
     force: args.force || undefined,
+    confirmCredits: args.confirmCredits ?? undefined,
+    mode: args.full ? "full" : undefined,
     surface: "cli",
   };
   const postStart = () =>

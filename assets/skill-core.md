@@ -32,7 +32,7 @@ Run Link and login commands in the foreground with `--no-wait`. When one prints 
 
 Run purchase commands in the foreground with `--no-wait`, the same way as Link sign-in. The human approves every payment in their Link app; never approve or pay yourself.
 
-1. When a scan exits 11 with a `top-up` block, or `credits buy` without `--pack` asks which pack, ask the human to choose (the block lists each pack's scans, price, and price per scan, and says when Link will first ask for a one-time payment permission or sign-in). If they choose not to buy, stop. Never pick a pack for them.
+1. When a scan exits 11 with a `top-up` block, or `credits buy` without `--pack` asks which pack, ask the human to choose (the block lists each pack's credits, price, and price per credit, and says when Link will first ask for a one-time payment permission or sign-in). If they choose not to buy, stop. Never pick a pack for them.
 2. Run `cleanslop credits buy --link --pack <pack> --no-wait` with their pack. It prints an `approve` block and exits 10. Ask its Done question: Link sends the approval to the human's Link app, and there is usually no link to open. If Link first needs payment permission, the block says so (header Permission): relay it as a one-time permission, not the purchase; nothing is charged, and the purchase approval comes next.
 3. When the human answers Done, run `cleanslop credits buy --link --resume`. If it prints `approve` again, they have not approved yet: relay the prompt again and wait. If it prints `ask_human`, relay it and follow it. Never start a second purchase while one is pending.
 4. On success it prints “Added … scan credits. Balance: N”. Rerun the scan.
@@ -64,6 +64,14 @@ When `review` is `unavailable`, the findings are unreviewed first-pass results (
 ## Fix loop
 
 A finished CLI report with `confirmed` or `needs_input` findings ends with a `fix_findings` question (Fix them / Show me first / Not now). The human does not see the CLI output, so the block includes a ready-made list of those findings: write it into your reply word for word as plain text, then ask the question, and do not edit code before the human answers. Then fix by priority, run the repo’s tests, ask the human about `needs_input`, rescan **once** (the CLI asks whether to upload the local files or have the human push first), and compare the delta (`new` / `still_open` / `resolved` / `no_longer_listed`). `no_longer_listed` means the review stopped listing the finding — it is not a confirmed fix.
+
+## Rescans
+
+A rescan builds on the last scan of the same branch (or of the same uploaded folder) and costs only the files changed since. The CLI prints `Incremental scan building on <scan id>`; the scan shows `incremental` and its `parentScanId`. A full scan prints why (`Full scan: …`). Pass `--full` (MCP: `scan_start` with `mode: "full"`) only when the human asks to rescan everything. When nothing changed since the last scan, the scan stops with `already_scanned` and a CLEANSLOP_QUESTION; nothing is charged. Ask it, and add `--full` only after the human says yes.
+
+## Scan credits
+
+A scan priced over 4 credits stops with `credits_confirmation_required` and its price, as a CLEANSLOP_QUESTION. Ask the human that question; only after a yes, run the same command again with `--confirm-credits <credits>` added (MCP: `scan_start` with `confirmCredits`). Never pass a price the human did not approve. Nothing is charged until then, and if the scan reads less, the difference comes back.
 
 ## Stop conditions
 

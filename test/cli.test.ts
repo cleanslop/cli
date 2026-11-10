@@ -216,6 +216,41 @@ test("whoami shows last4 only; unexpected errors exit 1", async () => {
   assert.equal(await runCli(["whoami"], github.deps), 0);
   assert.match(github.cap.out(), /plan pro\n/);
   assert.doesNotMatch(github.cap.out(), /billing/);
+  // Credits-aware server: allowance and balance in credits; JSON carries both.
+  fake.state.meQuota = { plan: "pro", planName: "Pro", scanLimit: 120, remaining: 119 };
+  fake.state.meCreditBalance = {
+    remaining: 476,
+    monthlyLeft: 472,
+    purchased: 4,
+    monthlyAllowance: 480,
+    scanCost: 4,
+  };
+  const credited = makeDeps({ origin: fake.origin, home });
+  assert.equal(await runCli(["whoami"], credited.deps), 0);
+  // Every request says what this CLI can do, whatever its version.
+  assert.equal(fake.state.lastFeatures, "confirm-credits");
+  assert.match(credited.cap.out(), /plan Pro \(480 credits per month\)\n/);
+  assert.match(credited.cap.out(), /credits 476 remaining, a scan uses 4\n/);
+  assert.doesNotMatch(credited.cap.out(), /^quota /m);
+  const creditedJson = makeDeps({ origin: fake.origin, home });
+  assert.equal(await runCli(["whoami", "--json"], creditedJson.deps), 0);
+  assert.deepEqual(JSON.parse(creditedJson.cap.out()).creditBalance, fake.state.meCreditBalance);
+  // Size-based prices: no single scan price, only the range.
+  fake.state.meCreditBalance = {
+    remaining: 476,
+    monthlyAllowance: 480,
+    scanCostMin: 1,
+    scanCostMax: 20,
+  };
+  const sized = makeDeps({ origin: fake.origin, home });
+  assert.equal(await runCli(["whoami"], sized.deps), 0);
+  assert.match(sized.cap.out(), /credits 476 remaining, a scan uses 1 to 20 by size\n/);
+  fake.state.meCreditBalance = { remaining: 1, monthlyAllowance: 1 };
+  const one = makeDeps({ origin: fake.origin, home });
+  assert.equal(await runCli(["whoami"], one.deps), 0);
+  assert.match(one.cap.out(), /plan Pro \(1 credit per month\)\n/);
+  assert.match(one.cap.out(), /credits 1 remaining\n/);
+  fake.state.meCreditBalance = null;
   fake.state.meQuota = { plan: "free", remaining: 3 };
 
   const missing = makeDeps({ origin: fake.origin, home: tempHome() });

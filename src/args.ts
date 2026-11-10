@@ -53,6 +53,7 @@ function emptyArgs(defaultWaitMs: number): ParsedArgs {
     noPromo: false,
     resume: false,
     force: false,
+    full: false,
     upload: false,
     preview: false,
     format: "md",
@@ -67,6 +68,7 @@ function emptyArgs(defaultWaitMs: number): ParsedArgs {
     agree: false,
     acceptTerms: false,
     yesShareEmail: false,
+    confirmCredits: null,
     pack: null,
     amount: null,
     networkId: null,
@@ -116,6 +118,9 @@ export function parseArgs(
       case "--force":
         out.force = true;
         break;
+      case "--full":
+        out.full = true;
+        break;
       case "--upload":
         out.upload = true;
         break;
@@ -150,6 +155,14 @@ export function parseArgs(
       case "--yes-share-email":
         out.yesShareEmail = true;
         break;
+      case "--confirm-credits": {
+        const next = rest.shift();
+        if (!next || !/^\d+$/.test(next)) {
+          throw usageError("--confirm-credits must be a whole number of credits");
+        }
+        out.confirmCredits = Number(next);
+        break;
+      }
       case "--pack": {
         const next = rest.shift();
         if (next !== "p5" && next !== "p15" && next !== "p40") {
@@ -251,7 +264,8 @@ export function parseArgs(
 export const HELP_TEXT = `cleanslop — CleanSlop agent CLI
 
 Usage:
-  cleanslop [scan] [--wait [duration]] [--json] [--force] [--preview] [--upload]
+  cleanslop [scan] [--wait [duration]] [--json] [--full] [--force] [--preview] [--upload]
+                 [--confirm-credits <credits>]
   cleanslop login [--link] [--agree] [--no-wait | --resume]
   cleanslop link-identity [--no-wait | --resume]
   cleanslop credits buy --link [--pack p5] [--no-promo] [--no-wait | --resume]
@@ -291,8 +305,10 @@ Wait:
 Flags:
   --json           one JSON document on stdout
   --force          skip same-commit dedupe (sends Idempotency-Key)
+  --full           scan: rescan everything instead of only what changed since the last scan
   --preview        first-pass report before judgment is final
   --upload         scan: upload the local files instead of the pushed commit (after the human picks it)
+  --confirm-credits scan: the price the human approved for a scan over 4 credits (only after they say yes)
   --no-wait        login / link-identity / credits buy / plan: print what to approve and exit 10
   --resume         login / link-identity / credits buy / plan: continue a pending --no-wait approval
   --link           login: Stripe Link sign-up / sign-in (requires link-cli)

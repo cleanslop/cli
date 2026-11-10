@@ -18,7 +18,7 @@ import {
 import { assertGithubReady, inspectGit, uploadLocalQuestion, uploadOption } from "../git.js";
 import { recoverOutOfScansIfOffered } from "./credits.js";
 import { httpRequest, requireOk } from "../http.js";
-import { writeJson, writeScanProgress } from "../output.js";
+import { writeCreditsReserved, writeJson, writeScanMode, writeScanProgress } from "../output.js";
 import { writeReport } from "../report-question.js";
 import type { GitSnapshot, MeResponse, ParsedArgs, StartScanResponse } from "../types.js";
 import { fetchReport } from "./report.js";
@@ -95,6 +95,8 @@ export async function runScan(
     commitSha: git.commitSha,
     branch: git.branch,
     force: args.force || undefined,
+    confirmCredits: args.confirmCredits ?? undefined,
+    mode: args.full ? "full" : undefined,
     surface: "cli",
   };
   const postStart = () =>
@@ -121,6 +123,8 @@ export async function runScan(
   const scan0 = payload.scan;
   await storeLastScanId(deps, origin, scan0.id);
   writeScanProgress(deps, scan0);
+  writeCreditsReserved(deps, payload);
+  writeScanMode(deps, payload);
 
   let scan = scan0;
   if (!isScanFinal(scan) && args.wait) {

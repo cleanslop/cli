@@ -18,7 +18,7 @@ npm run build
 
 - `npm test` runs `node:test` with c8 against a fake HTTP server. The coverage floor is 90% for lines, statements and functions, and 80% for branches.
 - The CLI has **zero runtime dependencies**. Keep it that way.
-- After editing `assets/skill-core.md`, run `npm run plugin:skill` to regenerate the plugin's `SKILL.md`, and bump `version` in `plugin/.claude-plugin/plugin.json` (Claude Code keeps an installed plugin's skill until that version changes). A test fails while the skill is stale.
+- `assets/skill-core.md` is also the source of the Claude Code plugin's `SKILL.md`, which now lives in [cleanslop/skills](https://github.com/cleanslop/skills). The maintainers regenerate it and bump the plugin version upstream when the core changes.
 - Keep it origin-neutral. Tests use `https://*.example` origins, and the default stays `https://cleanslop.com`.
 - Changes to the HTTP contract (`/api/agent/v1/*`, exit codes, `CLEANSLOP_ACTION_REQUIRED` blocks) need a matching server change, so open an issue first.
 

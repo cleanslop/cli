@@ -12,6 +12,11 @@ function scansPerMonth(limit: number | undefined): string {
   return ` (${limit} ${limit === 1 ? "scan" : "scans"} per month)`;
 }
 
+/** ` (120 credits per month)` from a credits-aware server. */
+function creditsPerMonth(allowance: number): string {
+  return ` (${allowance} ${allowance === 1 ? "credit" : "credits"} per month)`;
+}
+
 export async function runWhoami(
   deps: CliDeps,
   args: ParsedArgs
@@ -34,6 +39,7 @@ export async function runWhoami(
     tokenLast4: creds.last4,
     source: creds.source,
     quota: me.quota ?? null,
+    creditBalance: me.creditBalance ?? null,
     webBilling: me.webBilling?.url ? me.webBilling : null,
     linkPlans: me.linkPlans === true,
   };
@@ -52,8 +58,24 @@ export async function runWhoami(
   if (payload.grantId) deps.io.stdout(`grant ${payload.grantId}\n`);
   const plan = me.quota?.plan;
   const planName = me.quota?.planName || plan;
-  if (planName) deps.io.stdout(`plan ${planName}${scansPerMonth(me.quota?.scanLimit)}\n`);
-  if (me.quota && typeof me.quota.remaining === "number") {
+  const balance = me.creditBalance;
+  const credited =
+    typeof balance?.remaining === "number" && typeof balance.monthlyAllowance === "number";
+  if (planName) {
+    const perMonth = credited
+      ? creditsPerMonth(balance!.monthlyAllowance!)
+      : scansPerMonth(me.quota?.scanLimit);
+    deps.io.stdout(`plan ${planName}${perMonth}\n`);
+  }
+  if (credited) {
+    const cost =
+      typeof balance!.scanCost === "number"
+        ? `, a scan uses ${balance!.scanCost}`
+        : typeof balance!.scanCostMin === "number" && typeof balance!.scanCostMax === "number"
+          ? `, a scan uses ${balance!.scanCostMin} to ${balance!.scanCostMax} by size`
+          : "";
+    deps.io.stdout(`credits ${balance!.remaining} remaining${cost}\n`);
+  } else if (me.quota && typeof me.quota.remaining === "number") {
     deps.io.stdout(`quota ${me.quota.remaining} remaining\n`);
   }
   const paid = Boolean(plan) && plan !== "free";

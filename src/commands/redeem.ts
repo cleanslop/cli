@@ -23,11 +23,26 @@ export async function runRedeem(deps: CliDeps, args: ParsedArgs): Promise<number
   const scans = typeof rec?.scanCredits === "number" ? rec.scanCredits : 0;
   const reviews = typeof rec?.reviewCredits === "number" ? rec.reviewCredits : 0;
   const balance = typeof rec?.credits === "number" ? rec.credits : null;
+  // Credits-aware servers also send amounts in credits (4 per scan).
+  const granted = typeof rec?.creditsGranted === "number" ? rec.creditsGranted : null;
+  const purchased = typeof rec?.purchasedCredits === "number" ? rec.purchasedCredits : null;
   if (args.json) {
-    writeJson(deps, { redeemed: true, scanCredits: scans, reviewCredits: reviews, credits: balance });
+    writeJson(deps, {
+      redeemed: true,
+      scanCredits: scans,
+      reviewCredits: reviews,
+      credits: balance,
+      ...(granted == null ? {} : { creditsGranted: granted }),
+      ...(purchased == null ? {} : { purchasedCredits: purchased }),
+    });
     return EXIT_OK;
   }
   const extra = reviews > 0 ? ` and ${reviews} review credits` : "";
+  if (granted != null) {
+    const tail = purchased == null ? "" : ` Balance: ${purchased} credits.`;
+    deps.io.stdout(`Promo code applied: added ${granted} credits (${scans} scans)${extra}.${tail}\n`);
+    return EXIT_OK;
+  }
   const tail = balance == null ? "" : ` Balance: ${balance}.`;
   deps.io.stdout(`Promo code applied: added ${scans} scan credits${extra}.${tail}\n`);
   return EXIT_OK;

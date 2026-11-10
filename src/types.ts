@@ -28,6 +28,8 @@ export type ParsedArgs = {
   noPromo: boolean;
   resume: boolean;
   force: boolean;
+  /** scan: rescan everything instead of building on the last scan. */
+  full: boolean;
   upload: boolean;
   preview: boolean;
   format: ReportFormat;
@@ -42,6 +44,8 @@ export type ParsedArgs = {
   agree: boolean;
   acceptTerms: boolean;
   yesShareEmail: boolean;
+  /** scan: the price the human approved after credits_confirmation_required. */
+  confirmCredits: number | null;
   pack: string | null;
   amount: number | null;
   networkId: string | null;
@@ -71,6 +75,9 @@ export type AgentScan = {
     } | null;
   } | null;
   findingCount?: number;
+  /** Builds on `parentScanId` and is priced on what changed since it. */
+  incremental?: boolean;
+  parentScanId?: string | null;
   elapsedSec?: number;
   eta?: { minSec: number; maxSec: number } | null;
   progress?: {
@@ -114,6 +121,18 @@ export type MeResponse = {
     monthlyLeft?: number;
     credits?: number;
   };
+  /** Server 2026-11+ (scan credits): balances in credits; `quota` stays in scans. */
+  creditBalance?: {
+    remaining?: number;
+    monthlyLeft?: number;
+    purchased?: number;
+    monthlyAllowance?: number;
+    /** Every scan's price while it is flat; omitted with size-based prices. */
+    scanCost?: number;
+    /** Server 2026-11+: what a scan can cost (1 to 20 with size-based prices). */
+    scanCostMin?: number;
+    scanCostMax?: number;
+  };
   links?: { account?: string; topUp?: string };
   uploads?: boolean;
   /** GitHub grant: may upload the local files when the pushed commit can't be scanned. */
@@ -150,6 +169,10 @@ export type StartScanResponse = {
   created?: boolean;
   deduped?: boolean;
   charged?: string | null;
+  /** Credits held for this scan; servers before size-based pricing omit it. */
+  credits?: { reserved?: number };
+  /** Why a new scan runs full; null when incremental. Older servers omit it. */
+  fullScanReason?: string | null;
 };
 
 export type GitSnapshot = {

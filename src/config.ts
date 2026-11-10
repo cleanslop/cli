@@ -1,5 +1,5 @@
 export const PACKAGE_NAME = "@cleanslop/cli";
-export const PACKAGE_VERSION = "0.1.0";
+export const PACKAGE_VERSION = "0.2.0";
 export const CLIENT_ID = "cleanslop-cli";
 export const DEFAULT_ORIGIN = "https://cleanslop.com";
 export const DEFAULT_WAIT_MS = 8 * 60 * 1000;
@@ -8,6 +8,8 @@ export const LONGPOLL_MAX_SEC = 45;
 export const DEVICE_GRANT_TYPE =
   "urn:ietf:params:oauth:grant-type:device_code";
 export const USER_AGENT = `${CLIENT_ID}/${PACKAGE_VERSION}`;
+/** What this CLI supports, sent on every request (`confirm-credits`: it can confirm scan prices). */
+export const CLI_FEATURES = "confirm-credits";
 export const CREDENTIALS_FILE = "credentials.json";
 export const PENDING_LOGIN_FILE = "pending-login.json";
 export const PENDING_SPEND_FILE = "pending-spend-request.json";

@@ -53,7 +53,7 @@ function sptOutOfScansBody(
     action: {
       kind: "ask_human",
       humanPrompt:
-        "Ask the human which CleanSlop credit pack to buy with Link: p5 (5 scans, 10.00 USD, 2.00 USD per scan). If they pick one, run `cleanslop credits buy --link --pack <pack> --no-wait`, relay its approval prompt (Link notifies their Link app; there is usually no link), and after they approve run `cleanslop credits buy --link --resume`. Then rerun the scan.",
+        "Ask the human which CleanSlop credit pack to buy with Link: p5 (20 credits, 10.00 USD, 0.50 USD per credit). If they pick one, run `cleanslop credits buy --link --pack <pack> --no-wait`, relay its approval prompt (Link notifies their Link app; there is usually no link), and after they approve run `cleanslop credits buy --link --resume`. Then rerun the scan.",
     },
     payment: {
       methods: packs.map((pack) => ({
@@ -196,6 +196,130 @@ test("origin not on github.com exits 13", async () => {
   });
   assert.equal(await runCli(["scan"], deps), 13);
   assert.match(cap.err(), /github.com/);
+});
+
+test("409 already_scanned asks whether to run a full scan", async () => {
+  const fake = await startFakeServer((state) => {
+    state.scanError = {
+      status: 409,
+      body: {
+        error: "already_scanned",
+        message: "Nothing changed since the scan this one would build on.",
+        action: {
+          kind: "ask_human",
+          humanPrompt: "Nothing changed since the last scan. Scan everything again anyway?",
+        },
+      },
+    };
+  });
+  cleanups.push(fake.close);
+  const home = tempHome();
+  await connected(fake.origin, home);
+  const asked = makeDeps({ origin: fake.origin, home, git: gitStub() });
+  assert.equal(await runCli(["scan"], asked.deps), 10);
+  const question = questionFrom(asked.cap.err());
+  assert.equal(question?.id, "scan_unchanged");
+  assert.deepEqual(
+    question?.options.map((o) => [o.value, o.next ?? null]),
+    [
+      ["full", "run the same cleanslop command again, with --full added"],
+      ["stop", null],
+    ]
+  );
+});
+
+test("409 credits_confirmation_required asks, and --confirm-credits sends the approval", async () => {
+  const priced = {
+    error: "credits_confirmation_required",
+    message: "This scan costs 8 credits. Ask the human, then start it again with confirmCredits: 8.",
+    action: { kind: "ask_human", humanPrompt: "This repo is L: 8 credits. Continue?" },
+    credits: 8,
+    tier: "L",
+  };
+  const fake = await startFakeServer((state) => {
+    state.scanError = { status: 409, body: priced };
+  });
+  cleanups.push(fake.close);
+  const home = tempHome();
+  await connected(fake.origin, home);
+
+  const asked = makeDeps({ origin: fake.origin, home, git: gitStub() });
+  assert.equal(await runCli(["scan"], asked.deps), 10);
+  assert.match(asked.cap.err(), /CLEANSLOP_ACTION_REQUIRED: ask_human/);
+  const question = questionFrom(asked.cap.err());
+  assert.equal(question?.id, "scan_credits");
+  assert.equal(question?.question, "This repo is L: 8 credits. Continue?");
+  assert.deepEqual(
+    question?.options.map((o) => [o.label, o.next ?? null]),
+    [
+      ["Scan for 8 credits", "run the same cleanslop command again, with --confirm-credits 8 added"],
+      ["Not now", null],
+    ]
+  );
+
+  // Without a price there is nothing to approve: the prompt alone.
+  fake.state.scanError = { status: 409, body: { ...priced, credits: undefined } };
+  const bare = makeDeps({ origin: fake.origin, home, git: gitStub() });
+  assert.equal(await runCli(["scan"], bare.deps), 10);
+  assert.equal(questionFrom(bare.cap.err()), null);
+
+  fake.state.scanError = null;
+  for (const [reserved, line] of [
+    [8, /Reserved 8 credits for this scan/],
+    [1, /Reserved 1 credit for this scan/],
+  ] as const) {
+    fake.state.scanReserved = reserved;
+    const approved = makeDeps({ origin: fake.origin, home, git: gitStub() });
+    assert.equal(await runCli(["scan", "--confirm-credits", "8"], approved.deps), 0);
+    assert.equal((fake.state.created.at(-1) as { confirmCredits?: number }).confirmCredits, 8);
+    assert.match(approved.cap.err(), line);
+  }
+  // Nothing held (a joined or same-commit scan): no line.
+  fake.state.scanReserved = 0;
+  const joined = makeDeps({ origin: fake.origin, home, git: gitStub() });
+  assert.equal(await runCli(["scan"], joined.deps), 0);
+  assert.doesNotMatch(joined.cap.err(), /Reserved/);
+  assert.equal((fake.state.created.at(-1) as { confirmCredits?: number }).confirmCredits, undefined);
+
+  const bad = makeDeps({ origin: fake.origin, home, git: gitStub() });
+  assert.equal(await runCli(["scan", "--confirm-credits", "eight"], bad.deps), 2);
+  assert.match(bad.cap.err(), /--confirm-credits must be a whole number of credits/);
+});
+
+test("--full asks for a full scan; the start says what it builds on or why it is full", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  const home = tempHome();
+  await connected(fake.origin, home);
+  const run = async (argv: string[], extra: Record<string, unknown> | null) => {
+    fake.state.scanStartExtra = extra;
+    const { deps, cap } = makeDeps({ origin: fake.origin, home, git: gitStub() });
+    assert.equal(await runCli(argv, deps), 0);
+    return { err: cap.err(), body: fake.state.created.at(-1) as { mode?: string } };
+  };
+
+  const full = await run(["scan", "--full"], { fullScanReason: "requested" });
+  assert.equal(full.body.mode, "full");
+  assert.match(full.err, /Full scan: a full scan was asked for\./);
+
+  const plain = await run(["scan"], { fullScanReason: "no_parent" });
+  assert.equal(plain.body.mode, undefined);
+  assert.match(plain.err, /Full scan: no earlier scan to build on\./);
+
+  const unknown = await run(["scan"], { fullScanReason: "something_new" });
+  assert.match(unknown.err, /Full scan: something_new\./);
+
+  const incremental = await run(["scan"], {
+    fullScanReason: null,
+    scan: { ...fake.state.scan, incremental: true, parentScanId: "scan_0" },
+  });
+  assert.match(incremental.err, /Incremental scan building on scan_0\./);
+
+  // A joined or deduped scan, or an older server: no line.
+  for (const extra of [{ created: false, fullScanReason: "no_parent" }, null]) {
+    const quiet = await run(["scan"], extra);
+    assert.doesNotMatch(quiet.err, /Incremental scan|Full scan/);
+  }
 });
 
 test("402 out_of_scans exits 11 with ACTION_REQUIRED top-up", async () => {
@@ -490,6 +614,15 @@ test("GitHub grant with uploadFallback asks push or upload for a dirty tree, and
   const uploaded = await fallbackScan(["scan", "--upload"], { dirty: true });
   assert.equal(uploaded.code, 0, uploaded.cap.err());
   assert.equal(uploaded.fake.state.uploaded.length, 1);
+  assert.equal((uploaded.fake.state.created[0] as { mode?: string }).mode, undefined);
+
+  // An upload rescan: --full asks for a full one; the start says which it is.
+  const full = await fallbackScan(["scan", "--upload", "--full"], { dirty: true }, (state) => {
+    state.scanStartExtra = { fullScanReason: "requested" };
+  });
+  assert.equal(full.code, 0, full.cap.err());
+  assert.equal((full.fake.state.created[0] as { mode?: string }).mode, "full");
+  assert.match(full.cap.err(), /Full scan: a full scan was asked for\./);
 });
 
 test("GitHub grant with uploadFallback scans a clean pushed commit from GitHub", async () => {
@@ -710,7 +843,7 @@ test("an agent's scan (no TTY) hands a stripe_spt 402 to credits buy --no-wait",
   assert.match(cap.err(), /CLEANSLOP_ACTION_REQUIRED: top-up/);
   assert.match(
     cap.err(),
-    /which CleanSlop credit pack to buy with Link: p5 \(5 scans, 10\.00 USD, 2\.00 USD per scan\), p15 \(15 scans, 25\.00 USD, 1\.67 USD per scan, best value\), or p40 \(40 scans, 60\.00 USD, 1\.50 USD per scan\)\./
+    /which CleanSlop credit pack to buy with Link: p5 \(20 credits, 10\.00 USD, 0\.50 USD per credit\), p15 \(60 credits, 25\.00 USD, 0\.42 USD per credit, best value\), or p40 \(160 credits, 60\.00 USD, 0\.38 USD per credit\)\./
   );
   assert.match(cap.err(), /run `cleanslop credits buy --link --pack <pack> --no-wait`/);
   const question = questionFrom(cap.err());
@@ -719,9 +852,9 @@ test("an agent's scan (no TTY) hands a stripe_spt 402 to credits buy --no-wait",
   assert.deepEqual(
     question?.options.map((o) => [o.value, o.description ?? null]),
     [
-      ["p5", "2.00 USD per scan"],
-      ["p15", "1.67 USD per scan, best value"],
-      ["p40", "1.50 USD per scan"],
+      ["p5", "0.50 USD per credit"],
+      ["p15", "0.42 USD per credit, best value"],
+      ["p40", "0.38 USD per credit"],
       ["none", "Buy nothing"],
     ]
   );
@@ -755,7 +888,7 @@ test("an agent's scan --pack p15 (no TTY) names only that pack", async () => {
   assert.equal(await runCli(["scan", "--pack", "p15"], deps), 11, cap.err());
   assert.match(
     cap.err(),
-    /whether to buy CleanSlop credit pack p15 \(15 scans, 25\.00 USD, 1\.67 USD per scan, best value\) with Link/
+    /whether to buy CleanSlop credit pack p15 \(60 credits, 25\.00 USD, 0\.42 USD per credit, best value\) with Link/
   );
   assert.match(cap.err(), /run `cleanslop credits buy --link --pack p15 --no-wait`/);
   assert.doesNotMatch(cap.err(), /p5 \(/);
@@ -797,7 +930,7 @@ test("an agent's out-of-scans asks buy, promo, or not now while a promo is possi
     value: "buy",
     label: "Buy with Link",
     description:
-      "p5 (5 scans, 10.00 USD, 2.00 USD per scan); p15 (15 scans, 25.00 USD, 1.67 USD per scan, best value); p40 (40 scans, 60.00 USD, 1.50 USD per scan)",
+      "p5 (20 credits, 10.00 USD, 0.50 USD per credit); p15 (60 credits, 25.00 USD, 0.42 USD per credit, best value); p40 (160 credits, 60.00 USD, 0.38 USD per credit)",
     run: "cleanslop credits buy --link --no-promo --no-wait",
   });
   assert.deepEqual(
@@ -810,7 +943,7 @@ test("an agent's out-of-scans asks buy, promo, or not now while a promo is possi
   assert.deepEqual(questionFrom(named.cap.err())?.options[0], {
     value: "p15",
     label: "Buy p15",
-    description: "p15 (15 scans, 25.00 USD, 1.67 USD per scan, best value)",
+    description: "p15 (60 credits, 25.00 USD, 0.42 USD per credit, best value)",
     run: "cleanslop credits buy --link --pack p15 --no-wait",
   });
   assert.equal(fake.state.purchases.length, 0);

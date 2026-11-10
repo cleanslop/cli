@@ -49,6 +49,36 @@ test("redeem mentions review credits and prints JSON with --json", async () => {
   });
 });
 
+test("redeem prints credits when the server sends them", async () => {
+  const reply = {
+    status: 200,
+    body: {
+      redeemed: true,
+      scanCredits: 5,
+      reviewCredits: 1,
+      credits: 6,
+      creditsGranted: 20,
+      purchasedCredits: 24,
+    },
+  };
+  const text = await setup(reply);
+  assert.equal(await runCli(["redeem", "PROMO1234"], text.deps), 0);
+  assert.equal(
+    text.cap.out(),
+    "Promo code applied: added 20 credits (5 scans) and 1 review credits. Balance: 24 credits.\n"
+  );
+  const json = await setup(reply);
+  assert.equal(await runCli(["redeem", "PROMO1234", "--json"], json.deps), 0);
+  assert.deepEqual(JSON.parse(json.cap.out()), reply.body);
+
+  const noBalance = await setup({
+    status: 200,
+    body: { redeemed: true, scanCredits: 5, creditsGranted: 20 },
+  });
+  assert.equal(await runCli(["redeem", "PROMO1234"], noBalance.deps), 0);
+  assert.equal(noBalance.cap.out(), "Promo code applied: added 20 credits (5 scans).\n");
+});
+
 test("redeem without a balance in the reply omits it", async () => {
   const { deps, cap } = await setup({ status: 200, body: { redeemed: true } });
   assert.equal(await runCli(["redeem", "PROMO1234"], deps), 0);

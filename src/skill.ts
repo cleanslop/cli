@@ -13,6 +13,7 @@ export const SKILL_HEADINGS = [
   "Waiting",
   "Reading the report",
   "Fix loop",
+  "Scan credits",
   "Stop conditions",
   "Report back",
   "Email",

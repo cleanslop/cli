@@ -28,8 +28,14 @@ export type FakeState = {
   revoked: string[];
   created: unknown[];
   lastAuth: string | null;
+  /** `X-CleanSlop-CLI-Features` of the last request. */
+  lastFeatures: string | null;
   meStatus: number;
   scanError: { status: number; body: Record<string, unknown> } | null;
+  /** POST /scans `credits.reserved` (size-based pricing); omitted when null. */
+  scanReserved: number | null;
+  /** Fields merged over the POST /scans reply (`fullScanReason`, `scan`, …). */
+  scanStartExtra: Record<string, unknown> | null;
   reportError: { status: number; body: Record<string, unknown> } | null;
   scan: FakeScan;
   reportMd: string;
@@ -52,6 +58,8 @@ export type FakeState = {
   webBilling: { url: string; emailMasked: string } | null;
   /** GET /me `quota` and `linkPlans`. */
   meQuota: Record<string, unknown>;
+  /** GET /me `creditBalance` (credits-aware servers); omitted when null. */
+  meCreditBalance: Record<string, unknown> | null;
   linkPlans: boolean;
   /** Query strings of report GETs. */
   reportQueries: string[];
@@ -162,8 +170,11 @@ export async function startFakeServer(
     revoked: [],
     created: [],
     lastAuth: null,
+    lastFeatures: null,
     meStatus: 200,
     scanError: null,
+    scanReserved: null,
+    scanStartExtra: null,
     reportError: null,
     scan: defaultScan("http://127.0.0.1"),
     reportMd: defaultReportMd(),
@@ -188,6 +199,7 @@ export async function startFakeServer(
     uploads: false,
     webBilling: null,
     meQuota: { plan: "free", remaining: 3 },
+    meCreditBalance: null,
     linkPlans: false,
     reportQueries: [],
     billingLinkPosts: 0,
@@ -228,6 +240,7 @@ export async function startFakeServer(
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const auth = req.headers.authorization ?? null;
     if (auth) state.lastAuth = auth;
+    state.lastFeatures = (req.headers["x-cleanslop-cli-features"] as string | undefined) ?? null;
 
     void (async () => {
       const body = await readBody(req);
@@ -305,6 +318,7 @@ export async function startFakeServer(
           user: { githubLogin: state.login, emailMasked: state.emailMasked },
           grant: { id: state.grantId, label: "cli", scopes: "scan report email" },
           quota: state.meQuota,
+          ...(state.meCreditBalance ? { creditBalance: state.meCreditBalance } : {}),
           ...(state.linkPlans ? { linkPlans: true } : {}),
           uploads: state.uploads,
           uploadFallback: state.uploadFallback,
@@ -528,6 +542,8 @@ export async function startFakeServer(
           created: true,
           deduped: false,
           charged: "monthly",
+          ...(state.scanReserved == null ? {} : { credits: { reserved: state.scanReserved } }),
+          ...state.scanStartExtra,
         });
         return;
       }

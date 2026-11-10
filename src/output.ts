@@ -67,6 +67,40 @@ export function resetAskEmailPrintedForTests(): void {
   printedAskEmailScanIds.clear();
 }
 
+/** The credits a new scan holds, when the server says (size-based pricing). */
+export function writeCreditsReserved(
+  deps: CliDeps,
+  started: { credits?: { reserved?: number } }
+): void {
+  const reserved = started.credits?.reserved;
+  if (typeof reserved !== "number" || reserved <= 0) return;
+  const noun = reserved === 1 ? "credit" : "credits";
+  deps.io.stderr(
+    `Reserved ${reserved} ${noun} for this scan. If it reads less, the difference comes back.\n`
+  );
+}
+
+const FULL_SCAN_REASONS: Record<string, string> = {
+  requested: "a full scan was asked for",
+  unavailable: "incremental scans aren't available here",
+  no_parent: "no earlier scan to build on",
+  snapshot_unavailable: "the last scan's files are no longer kept",
+};
+
+/** Whether a new scan builds on an earlier one, or why it runs full. */
+export function writeScanMode(
+  deps: CliDeps,
+  started: { created?: boolean; scan: AgentScan; fullScanReason?: string | null }
+): void {
+  if (started.created !== true) return;
+  if (started.scan.incremental && started.scan.parentScanId) {
+    deps.io.stderr(`Incremental scan building on ${started.scan.parentScanId}.\n`);
+    return;
+  }
+  const reason = started.fullScanReason;
+  if (reason) deps.io.stderr(`Full scan: ${FULL_SCAN_REASONS[reason] ?? reason}.\n`);
+}
+
 export function writeScanProgress(deps: CliDeps, scan: AgentScan): void {
   deps.io.stderr(`${scanLine(scan)}\n`);
   if (scan.progress) {

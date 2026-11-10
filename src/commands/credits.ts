@@ -47,10 +47,11 @@ import {
 } from "../top-up.js";
 import type { ParsedArgs } from "../types.js";
 
+/** Credits in each pack (4 credits = one flat scan; size-based scans cost 1 to 20). */
 const CREDIT_PACKS = {
-  p5: 5,
-  p15: 15,
-  p40: 40,
+  p5: 20,
+  p15: 60,
+  p40: 160,
 } as const;
 
 type CreditPackId = keyof typeof CREDIT_PACKS;
@@ -59,8 +60,8 @@ function isCreditPackId(value: string | null): value is CreditPackId {
   return value === "p5" || value === "p15" || value === "p40";
 }
 
-function spendRequestContext(pack: CreditPackId, scans: number): string {
-  const text = `CleanSlop ${scans} scan credits (pack ${pack}). Approve this Shared Payment Token so your coding agent can add credits to this CleanSlop account. This is a one-time charge for scan credits only.`;
+function spendRequestContext(pack: CreditPackId, credits: number): string {
+  const text = `CleanSlop ${credits} scan credits (pack ${pack}). Approve this Shared Payment Token so your coding agent can add credits to this CleanSlop account. This is a one-time charge for scan credits only.`;
   return text.length >= 100 ? text : text.padEnd(100, ".");
 }
 
@@ -152,13 +153,13 @@ export function formatPackPrice(amount: number, currency: string): string {
   return `${(amount / 10 ** digits).toFixed(digits)} ${currency.toUpperCase()}`;
 }
 
-/** `p15 (15 scans, 25.00 USD, 1.67 USD per scan, best value)`. */
+/** `p15 (60 credits, 48.00 USD, 0.80 USD per credit, best value)`. */
 export function describePackOffer(offer: StripeSptOffer): string {
-  const scans = CREDIT_PACKS[offer.pack];
+  const credits = CREDIT_PACKS[offer.pack];
   const parts = [
-    `${scans} scans`,
+    `${credits} credits`,
     formatPackPrice(offer.amount, offer.currency),
-    `${formatPackPrice(Math.round(offer.amount / scans), offer.currency)} per scan`,
+    `${formatPackPrice(Math.round(offer.amount / credits), offer.currency)} per credit`,
   ];
   if (offer.best) parts.push("best value");
   return `${offer.pack} (${parts.join(", ")})`;
@@ -179,12 +180,12 @@ function buyCommand(pack: string): string {
 }
 
 function packOption(offer: StripeSptOffer): ActionQuestionOption {
-  const scans = CREDIT_PACKS[offer.pack];
-  const perScan = formatPackPrice(Math.round(offer.amount / scans), offer.currency);
+  const credits = CREDIT_PACKS[offer.pack];
+  const perCredit = formatPackPrice(Math.round(offer.amount / credits), offer.currency);
   return {
     value: offer.pack,
-    label: `${scans} scans · ${formatPackPrice(offer.amount, offer.currency)}`,
-    description: `${perScan} per scan${offer.best ? ", best value" : ""}`,
+    label: `${credits} credits · ${formatPackPrice(offer.amount, offer.currency)}`,
+    description: `${perCredit} per credit${offer.best ? ", best value" : ""}`,
     run: buyCommand(offer.pack),
   };
 }
@@ -642,7 +643,12 @@ async function postPurchase(
   pending: PendingSpendRequest,
   token: string,
   sharedPaymentToken: string
-): Promise<{ credits: number; pack: string; paymentIntentId: string | null }> {
+): Promise<{
+  credits: number;
+  purchasedCredits: number | null;
+  pack: string;
+  paymentIntentId: string | null;
+}> {
   const result = await httpRequest(deps, origin, "POST", "/api/agent/v1/credits/purchases", {
     token,
     body: {
@@ -661,10 +667,12 @@ async function postPurchase(
   }
   const rec = asRecord(result.json);
   const credits = typeof rec?.credits === "number" ? rec.credits : 0;
+  const purchasedCredits =
+    typeof rec?.purchasedCredits === "number" ? rec.purchasedCredits : null;
   const pack = typeof rec?.pack === "string" ? rec.pack : pending.pack;
   const paymentIntentId =
     typeof rec?.paymentIntentId === "string" ? rec.paymentIntentId : null;
-  return { credits, pack, paymentIntentId };
+  return { credits, purchasedCredits, pack, paymentIntentId };
 }
 
 /** Reads this grant's Link packs from `GET /credits/offers` (same shape as a 402). */
@@ -838,7 +846,7 @@ export async function buyLinkCredits(
         "credits buy --link needs a Stripe network id from CleanSlop or CLEANSLOP_STRIPE_PROFILE_ID"
       );
     }
-    const scans = CREDIT_PACKS[pack];
+    const credits = CREDIT_PACKS[pack];
     const currency = chosen?.currency ?? "usd";
     const testMode = linkSpendRequestTestMode(deps, networkId);
     await ensureLinkPaymentScope(deps, {
@@ -849,8 +857,8 @@ export async function buyLinkCredits(
       networkId,
       amount,
       currency,
-      context: spendRequestContext(pack, scans),
-      lineItem: `name:CleanSlop ${scans} scan credits,unit_amount:${amount},quantity:1`,
+      context: spendRequestContext(pack, credits),
+      lineItem: `name:CleanSlop ${credits} scan credits,unit_amount:${amount},quantity:1`,
       total: `type:total,display_text:Total,amount:${amount}`,
       idempotencyKey: deps.randomId(),
       testMode,
@@ -880,8 +888,8 @@ export async function buyLinkCredits(
     if (autoApproved) waitMs = Math.max(waitMs, AUTO_APPROVE_WAIT_MS);
     const price = formatPackPrice(amount, currency);
     const ask = created.approvalUrl
-      ? `Ask the human to open this link and approve this CleanSlop credit pack (${pack}: ${scans} scans for ${price}). Link may also send a notification.`
-      : `Ask the human to approve this CleanSlop credit pack (${pack}: ${scans} scans for ${price}) ${IN_LINK_APP}.`;
+      ? `Ask the human to open this link and approve this CleanSlop credit pack (${pack}: ${credits} credits for ${price}). Link may also send a notification.`
+      : `Ask the human to approve this CleanSlop credit pack (${pack}: ${credits} credits for ${price}) ${IN_LINK_APP}.`;
     const url = created.approvalUrl ? { url: created.approvalUrl } : {};
     const prompt = !settled && !autoApproved;
     if (prompt && mode !== "wait") {
@@ -890,7 +898,7 @@ export async function buyLinkCredits(
         humanPrompt: `${ask} After they approve, run \`${BUY_COMMAND} --resume\`.`,
         ...url,
         question: paymentApprovalQuestion(
-          `the CleanSlop credit pack (${pack}: ${scans} scans for ${price})`,
+          `the CleanSlop credit pack (${pack}: ${credits} credits for ${price})`,
           created.approvalUrl
         ),
       });
@@ -941,7 +949,9 @@ export async function buyLinkCredits(
   );
   deletePendingSpend(deps);
   deps.io.stdout(
-    `Added ${paid.pack} scan credits. Balance: ${paid.credits}.\n`
+    paid.purchasedCredits == null
+      ? `Added ${paid.pack} scan credits. Balance: ${paid.credits}.\n`
+      : `Added ${paid.pack} scan credits. Balance: ${paid.purchasedCredits} credits.\n`
   );
   return EXIT_OK;
 }

@@ -7,7 +7,10 @@
   "plugins": [
     {
       "name": "cleanslop",
-      "source": "./plugin",
+      "source": {
+        "source": "github",
+        "repo": "cleanslop/skills"
+      },
       "description": "Readiness scans from Claude Code. A skill scans your repo at milestones and before PRs, reads the report and fixes what it finds, using CleanSlop's remote MCP server or its open-source CLI."
     }
   ]

@@ -1,4 +1,4 @@
-import { USER_AGENT } from "./config.js";
+import { CLI_FEATURES, USER_AGENT } from "./config.js";
 import type { CliDeps, HttpResult } from "./deps.js";
 import {
   actionError,
@@ -63,6 +63,9 @@ export async function httpRequest(
   const url = `${origin}${path}`;
   const headers = new Headers(opts.headers);
   headers.set("User-Agent", USER_AGENT);
+  // Lets the server tell what this CLI can do even when its version is a
+  // source build's 0.1.0.
+  headers.set("X-CleanSlop-CLI-Features", CLI_FEATURES);
   headers.set("Accept", opts.accept ?? "application/json");
   if (opts.token) {
     headers.set("Authorization", `Bearer ${opts.token}`);
@@ -124,6 +127,33 @@ function actionFromBody(
 }
 
 /** Without Link packs (`credits.ts` handles those), offer checkout or a promo code. */
+/**
+ * A scan priced over 4 credits: ask the human, and on a yes rerun with
+ * `--confirm-credits` set to that price. Nothing is charged until then.
+ */
+function creditsConfirmAction(body: AgentErrorBody, json: unknown): ActionRequired {
+  const action = actionFromBody(body, "ask_human");
+  const credits = (json as { credits?: unknown } | null)?.credits;
+  if (typeof credits !== "number") return action;
+  return {
+    ...action,
+    question: {
+      id: "scan_credits",
+      header: "Credits",
+      question: action.humanPrompt,
+      options: [
+        {
+          value: "scan",
+          label: `Scan for ${credits} credits`,
+          description: "If the scan reads less, the difference comes back",
+          next: `${RERUN_SAME_COMMAND}, with --confirm-credits ${credits} added`,
+        },
+        { value: "stop", label: "Not now", description: "Stop here; nothing is charged" },
+      ],
+    },
+  };
+}
+
 function outOfScansAction(body: AgentErrorBody, json: unknown): ActionRequired {
   const action = actionFromBody(body, "top-up");
   const web = monthlyPlanOffered(json);
@@ -253,6 +283,28 @@ export function throwHttpError(result: HttpResult): never {
       });
     case "out_of_scans":
       throw new CliError(message, EXIT_PAYMENT, outOfScansAction(body, result.json));
+    case "credits_confirmation_required":
+      throw new CliError(message, EXIT_ACTION, creditsConfirmAction(body, result.json));
+    case "already_scanned": {
+      const action = actionFromBody(body, "ask_human");
+      throw new CliError(message, EXIT_ACTION, {
+        ...action,
+        question: {
+          id: "scan_unchanged",
+          header: "Unchanged",
+          question: action.humanPrompt,
+          options: [
+            {
+              value: "full",
+              label: "Full scan",
+              description: "Scan everything again; it costs the repo's full price",
+              next: `${RERUN_SAME_COMMAND}, with --full added`,
+            },
+            { value: "stop", label: "Not now", description: "Stop here; nothing is charged" },
+          ],
+        },
+      });
+    }
     case "repo_not_connected":
       throw new CliError(message, EXIT_ACTION, installAction(body));
     case "github_reauth_required":

@@ -1,6 +1,6 @@
 {
   "name": "@cleanslop/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CleanSlop CLI — readiness scans from your coding agent",
   "keywords": [
     "code-review",
@@ -39,7 +39,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "c8 --config c8.config.json node --import tsx --test --test-reporter spec 'test/**/*.test.ts'",
-    "plugin:skill": "tsx scripts/render-plugin-skill.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "license": "MIT",

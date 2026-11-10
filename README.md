@@ -10,6 +10,14 @@ Readiness scans from your coding agent. The CLI starts a [CleanSlop](https://cle
 - Agent guide (Markdown): <https://cleanslop.com/agents.md>
 - Prefer MCP? Install the remote server: <https://cleanslop.com/mcp>
 
+## New in 0.2.0
+
+- **Rescans check only what changed.** `cleanslop scan` builds on the last scan of the same branch, or of the same uploaded folder, and costs only the files changed since. It prints which scan it built on, or why it ran a full scan. `--full` scans everything again; when nothing changed, it asks before doing that.
+- **Credits.** Balances, plans and packs are counted in credits. A scan priced over 4 credits stops before it is charged and asks; after a yes, rerun with `--confirm-credits <credits>`.
+- **The Claude Code plugin moved** to [cleanslop/skills](https://github.com/cleanslop/skills).
+
+Everything else is in [CHANGELOG.md](./CHANGELOG.md).
+
 ## Quick start
 
 ```bash
@@ -24,14 +32,14 @@ Requires Node 22 or later (Node 20 is end-of-life; npm warns there). **Zero runt
 
 | Command | Purpose |
 |---|---|
-| `scan` (default) | Resolve the github.com origin + HEAD, start a scan, optionally `--wait` |
+| `scan` (default) | Resolve the github.com origin + HEAD and start a scan. It builds on the last scan of the branch (or of the uploaded folder) and costs only the files changed since. `--wait` waits for the report; `--full` scans everything again; `--upload` scans the local files instead of the pushed commit (after the human picks it); `--confirm-credits <credits>` approves a price over 4 credits, only after the human says yes; `--force` skips the same-commit dedupe |
 | `login [--link [--agree]] [--no-wait \| --resume]` | RFC 8628 device flow. Prints `verification_uri_complete` and `user_code`. `--no-wait` stores the device code; `--resume` finishes it. `--link` signs up or signs in with Stripe Link through `link-cli` instead of GitHub; pass `--agree` only after the human says yes to the quoted terms question. Never prints the token. |
 | `logout [--all]` | Revoke server-side, delete this origin's credentials, and drop its pending GitHub login and Link payment. `--all` revokes every saved origin's token and deletes all local CleanSlop data (Link's own session and `~/.link-cli` files stay; `link-cli auth logout` clears the session) |
-| `whoami` | Connected `@login` and token last4 |
+| `whoami` | Connected `@login`, token last4, plan with its monthly credits, and credits remaining (with what a scan costs). `--json` adds `creditBalance` |
 | `status [id] [--wait]` | Poll scan status |
 | `report [id] [--format md\|json] [--preview]` | Fetch `cleanslop.report.v1` (the whole list: `limit=250`). A final Markdown report with confirmed or needs-input findings is followed on stderr by a `fix_findings` question (Fix them / Show me first / Not now); `scan` does the same. Exit stays 0. |
 | `setup` | Idempotent skill/rules. Never logs in, never writes a token |
-| `redeem <code>` | Redeem a promo (invite) code the human gave you for free scans (`POST /api/agent/v1/credits/redeem`). One code per account; `promo_invalid` / `promo_already_redeemed` exit 12 with an `ask_human` block. |
+| `redeem <code>` | Redeem a promo (invite) code the human gave you for bonus credits (`POST /api/agent/v1/credits/redeem`). One code per account; `promo_invalid` / `promo_already_redeemed` exit 12 with an `ask_human` block. |
 | `credits buy --link [--pack p5\|p15\|p40] [--no-promo] [--no-wait \| --resume]` | Link account: buys a one-time credit pack from a Link approval (`link-cli spend-request create`), then `POST /api/agent/v1/credits/purchases`. `--pack` is required without a terminal (the human picks); a terminal defaults to `p5`. `--no-promo` skips the promo-code choice. `--no-wait` prints what to approve and exits 10; `--resume` continues it, saved in `pending-spend-request.json`. |
 | `billing` | Link account: `POST /api/agent/v1/billing/sign-in-link` has the server email a sign-in link to the account's Link address, where the human subscribes, buys credits or cancels a plan. Prints the masked address it went to, plus `/signin/email?from=agent` and the masked email to type if it does not arrive. When the server cannot send (email login off, rate limited) or is older (404, read `webBilling` from `GET /me`), it prints only the typed-address page. The CLI never sees the link. Exits 10 with an `ask_human` block; `--json` prints `{sent, expiresAt \| reason, webBilling}`. Prints "Not available for this account" (exit 0) without `webBilling`. |
 | `plan [starter\|pro\|max]` | Link account: starts a monthly plan paid each month from a recurring Link approval (`link-cli spend-request create --recurring-interval month`), then `POST /api/agent/v1/plans/purchases`. Without a plan name an agent gets a `link_plan` question (Starter, Pro, Max with monthly prices, Not now). Same `--no-wait` / `--resume` flow as `credits buy --link`, saved in its own `pending-plan-request.json`. When CleanSlop offers no Link plans it does what `billing` does. Prints "Started the CleanSlop … plan" (exit 0). Change or cancel the plan with `billing`. |
@@ -56,7 +64,7 @@ Default is **user scope**:
 
 `--project` writes `.cursor/rules/cleanslop.mdc` and an `AGENTS.md` marker in the current repo. `--dry-run` / non-TTY without `--yes` only print the plan. `--uninstall` removes the marker blocks / owned files.
 
-Skill / Cursor rules / AGENTS snippet are generated from [`assets/skill-core.md`](./assets/skill-core.md), and so is the plugin's [`plugin/skills/cleanslop/SKILL.md`](./plugin/skills/cleanslop/SKILL.md) (`npm run plugin:skill`). Remote MCP is a separate install: see <https://cleanslop.com/mcp>.
+Skill / Cursor rules / AGENTS snippet are generated from [`assets/skill-core.md`](./assets/skill-core.md). The Claude Code plugin's `SKILL.md` in [cleanslop/skills](https://github.com/cleanslop/skills) is rendered from the same file. Remote MCP is a separate install: see <https://cleanslop.com/mcp>.
 
 ## Credentials
 
@@ -73,7 +81,7 @@ Skill / Cursor rules / AGENTS snippet are generated from [`assets/skill-core.md`
 | 0 | Done |
 | 1 | Unexpected error |
 | 2 | Usage or config |
-| 10 | Human action (approve, install, reauth) |
+| 10 | Human action (approve, install, reauth, or a question such as a scan price to confirm) |
 | 11 | Payment (402) |
 | 12 | Policy (waitlisted, beta, cap) |
 | 13 | Source unavailable (dirty, unpushed, not github.com) |
@@ -84,12 +92,14 @@ Skill / Cursor rules / AGENTS snippet are generated from [`assets/skill-core.md`
 
 ## Claude Code plugin
 
-This repository is also a Claude Code plugin marketplace. The plugin bundles the skill and the remote MCP server:
+The plugin, which bundles the skill and the remote MCP server, lives in [cleanslop/skills](https://github.com/cleanslop/skills):
 
 ```text
-/plugin marketplace add cleanslop/cli
+/plugin marketplace add cleanslop/skills
 /plugin install cleanslop@cleanslop
 ```
+
+The `cleanslop` marketplace in this repository still works; it now installs the plugin from cleanslop/skills.
 
 ## Development
 

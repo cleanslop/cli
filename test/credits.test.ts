@@ -374,7 +374,7 @@ test("createLinkSpendRequest uses the default link-cli timeout", async () => {
     amount: 1000,
     currency: "usd",
     context: "x".repeat(100),
-    lineItem: "name:CleanSlop 5 scan credits,unit_amount:1000,quantity:1",
+    lineItem: "name:CleanSlop 20 scan credits,unit_amount:1000,quantity:1",
     total: "type:total,display_text:Total,amount:1000",
     idempotencyKey: "idem-test-1",
   });
@@ -810,7 +810,7 @@ test("an agent's credits buy without --pack asks the human which pack", async ()
   assert.match(cap.err(), /CLEANSLOP_ACTION_REQUIRED: ask_human/);
   assert.match(
     cap.err(),
-    /which CleanSlop credit pack to buy with Link: p5 \(5 scans, 5\.00 USD, 1\.00 USD per scan\) or p15 \(15 scans, 12\.00 USD, 0\.80 USD per scan\)\./
+    /which CleanSlop credit pack to buy with Link: p5 \(20 credits, 5\.00 USD, 0\.25 USD per credit\) or p15 \(60 credits, 12\.00 USD, 0\.20 USD per credit\)\./
   );
   assert.match(cap.err(), /run `cleanslop credits buy --link --pack <pack> --no-wait`/);
   assert.equal(readState(statePath).creates, 0);
@@ -821,19 +821,19 @@ test("an agent's credits buy without --pack asks the human which pack", async ()
   assert.deepEqual(question?.options, [
     {
       value: "p5",
-      label: "5 scans · 5.00 USD",
-      description: "1.00 USD per scan",
+      label: "20 credits · 5.00 USD",
+      description: "0.25 USD per credit",
       run: "cleanslop credits buy --link --pack p5 --no-wait",
     },
     {
       value: "p15",
-      label: "15 scans · 12.00 USD",
-      description: "0.80 USD per scan",
+      label: "60 credits · 12.00 USD",
+      description: "0.20 USD per credit",
       run: "cleanslop credits buy --link --pack p15 --no-wait",
     },
     { value: "none", label: "Not now", description: "Buy nothing" },
   ]);
-  assert.match(cap.err(), /Options:\n  1\. 5 scans · 5\.00 USD \(1\.00 USD per scan\) → run: cleanslop credits buy --link --pack p5 --no-wait/);
+  assert.match(cap.err(), /Options:\n  1\. 20 credits · 5\.00 USD \(0\.25 USD per credit\) → run: cleanslop credits buy --link --pack p5 --no-wait/);
   assert.match(cap.err(), /  3\. Not now \(Buy nothing\) → stop/);
   assert.match(cap.err(), /multiple-choice question tool/);
 });
@@ -878,7 +878,7 @@ test("an agent's credits buy asks buy, promo, or not now while a promo code is p
     value: "buy",
     label: "Buy with Link",
     description:
-      "p5 (5 scans, 5.00 USD, 1.00 USD per scan); p15 (15 scans, 12.00 USD, 0.80 USD per scan)",
+      "p5 (20 credits, 5.00 USD, 0.25 USD per credit); p15 (60 credits, 12.00 USD, 0.20 USD per credit)",
     run: "cleanslop credits buy --link --no-promo --no-wait",
   });
   assert.deepEqual(
@@ -898,7 +898,7 @@ test("an agent's credits buy asks buy, promo, or not now while a promo code is p
   assert.deepEqual(questionFrom(single.err)?.options[0], {
     value: "p40",
     label: "Buy p40",
-    description: "p40 (40 scans, 30.00 USD, 0.75 USD per scan)",
+    description: "p40 (160 credits, 30.00 USD, 0.19 USD per credit)",
     run: "cleanslop credits buy --link --pack p40 --no-wait",
   });
 
@@ -937,7 +937,7 @@ test("an agent's credits buy without --pack goes ahead when only one pack is off
   const { deps, cap } = makeDeps({ origin: fake.origin, home, envExtra: env, stdinIsTTY: false });
   assert.equal(await runCli(["credits", "buy", "--link", "--no-wait"], deps), 10, cap.err());
   assert.match(cap.err(), /CLEANSLOP_ACTION_REQUIRED: approve/);
-  assert.match(cap.err(), /p40: 40 scans for 30\.00 USD/);
+  assert.match(cap.err(), /p40: 160 credits for 30\.00 USD/);
   assert.equal(readState(statePath).creates, 1);
 });
 
@@ -1025,11 +1025,11 @@ test("credits buy --no-wait fetches the pack price, stops at approval, and --res
   assert.equal(fake.state.offerRequests, 1);
   assert.match(started.cap.err(), /CLEANSLOP_ACTION_REQUIRED: approve/);
   assert.match(started.cap.err(), /https:\/\/app\.link\.com\/spend\/approve\?code=test/);
-  assert.match(started.cap.err(), /p15: 15 scans for 12\.00 USD/);
+  assert.match(started.cap.err(), /p15: 60 credits for 12\.00 USD/);
   assert.match(started.cap.err(), /run `cleanslop credits buy --link --resume`/);
   const approval = questionFrom(started.cap.err());
   assert.equal(approval?.id, "link_payment_approval");
-  assert.match(approval?.question ?? "", /spend\/approve\?code=test.*p15: 15 scans for 12\.00 USD/);
+  assert.match(approval?.question ?? "", /spend\/approve\?code=test.*p15: 60 credits for 12\.00 USD/);
   assert.deepEqual(
     approval?.options.map((o) => [o.label, o.run ?? null]),
     [
@@ -1331,6 +1331,13 @@ test("credits buy auto-resumes Link 3DS and retrieve failures", async () => {
 test("credits buy upgrades an existing session that lacks payment_methods.agentic", async () => {
   const fake = await startFakeServer();
   cleanups.push(fake.close);
+  // Credits-aware server: the balance line is in credits.
+  fake.state.purchaseResult = {
+    credits: 6,
+    purchasedCredits: 24,
+    pack: "p5",
+    paymentIntentId: "pi_test_1",
+  };
   const home = tempHome();
   const statePath = join(home, "fake-link-state.json");
   writeFileSync(statePath, JSON.stringify({ creates: 0, includeRetrieves: 0 }));
@@ -1366,6 +1373,7 @@ test("credits buy upgrades an existing session that lacks payment_methods.agenti
   assert.equal(upgradeArgs[0]![scopeAt + 1], "userinfo:read payment_methods.agentic");
   assert.match(cap.err(), /https:\/\/app\.link\.com\/device\/setup\?code=upgrade/);
   assert.match(cap.out(), /Added p5 scan credits/);
+  assert.match(cap.out(), /Balance: 24 credits\./);
   noSecrets(cap.out() + cap.err());
 });
 
@@ -2240,7 +2248,7 @@ test("Link's error-only samples need delegated approval, which spend-request cre
     amount: 1000,
     currency: "usd",
     context: "x".repeat(100),
-    lineItem: "name:CleanSlop 5 scan credits,unit_amount:1000,quantity:1",
+    lineItem: "name:CleanSlop 20 scan credits,unit_amount:1000,quantity:1",
     total: "type:total,display_text:Total,amount:1000",
     idempotencyKey: "idem-flags",
     testMode: false,
