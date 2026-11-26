@@ -59,6 +59,14 @@ export async function runScan(
   });
   requireOk(meRes);
   const me = (meRes.json ?? {}) as MeResponse;
+  // A server without Security scans would run (and charge) a readiness scan
+  // instead, so ask before starting anything.
+  if (args.security && me.securityScans !== true) {
+    throw new CliError(
+      `Security scans aren't available on ${origin} yet. Nothing was started or charged.`,
+      EXIT_POLICY
+    );
+  }
   const canUpload = me.uploadFallback === true;
   if (me.uploads === true) {
     return runUploadScan(deps, args);
@@ -97,6 +105,13 @@ export async function runScan(
     force: args.force || undefined,
     confirmCredits: args.confirmCredits ?? undefined,
     mode: args.full ? "full" : undefined,
+    // Review note (decided): the start response is not required to echo
+    // `profile`. CleanSlop runs one process, and it turns Security scans off
+    // with a flag rather than by deploying an older build. A server with the
+    // flag off refuses `profile: "security"` instead of dropping it, so even
+    // a switch between the `/me` check and this POST (say, while a top-up is
+    // waiting) never starts a readiness scan.
+    profile: args.security ? "security" : undefined,
     surface: "cli",
   };
   const postStart = () =>

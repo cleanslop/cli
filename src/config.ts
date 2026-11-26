@@ -17,8 +17,6 @@ export const PENDING_PLAN_FILE = "pending-plan-request.json";
 export const SKILL_MARKER_BEGIN = "<!-- cleanslop:begin v1 -->";
 export const SKILL_MARKER_END = "<!-- cleanslop:end -->";
 export const TOKEN_RE = /cslop_(?:agt|mat|mrt)_[A-Za-z0-9]+/g;
-/** Must match `EN_TERMS.updatedOn` on the server. */
-export const TERMS_UPDATED_ON = "2026-10-09";
 export const LINK_CLI_TIMEOUT_MS = 15_000;
 /**
  * Used when `link-cli` is not on PATH or is older than `LINK_CLI_MIN_VERSION`.

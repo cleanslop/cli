@@ -1,4 +1,4 @@
-import { CLIENT_ID, TERMS_UPDATED_ON } from "../config.js";
+import { CLIENT_ID } from "../config.js";
 import { offerGithubAfterLinkFailure } from "../connect.js";
 import { resolveOrigin } from "../credentials.js";
 import type { CliDeps, HttpResult } from "../deps.js";
@@ -51,7 +51,8 @@ async function signInWithLink(
   origin: string,
   consentSource: LinkConsentSource | null
 ): Promise<number | "terms_required"> {
-  const acceptTerms = consentSource ? TERMS_UPDATED_ON : null;
+  // Any non-blank value is consent; the server records its own current terms.
+  const acceptTerms = consentSource ? "current" : null;
   const attestation = await linkAttestation(deps, { mode: linkAuthMode(args) }).catch(
     offerGithubAfterLinkFailure
   );

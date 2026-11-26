@@ -54,6 +54,7 @@ function emptyArgs(defaultWaitMs: number): ParsedArgs {
     resume: false,
     force: false,
     full: false,
+    security: false,
     upload: false,
     preview: false,
     format: "md",
@@ -120,6 +121,9 @@ export function parseArgs(
         break;
       case "--full":
         out.full = true;
+        break;
+      case "--security":
+        out.security = true;
         break;
       case "--upload":
         out.upload = true;
@@ -264,7 +268,7 @@ export function parseArgs(
 export const HELP_TEXT = `cleanslop — CleanSlop agent CLI
 
 Usage:
-  cleanslop [scan] [--wait [duration]] [--json] [--full] [--force] [--preview] [--upload]
+  cleanslop [scan] [--wait [duration]] [--json] [--full] [--security] [--force] [--preview] [--upload]
                  [--confirm-credits <credits>]
   cleanslop login [--link] [--agree] [--no-wait | --resume]
   cleanslop link-identity [--no-wait | --resume]
@@ -306,6 +310,7 @@ Flags:
   --json           one JSON document on stdout
   --force          skip same-commit dedupe (sends Idempotency-Key)
   --full           scan: rescan everything instead of only what changed since the last scan
+  --security       scan: run a Security scan: its own checks, report and price (half a full scan); always full
   --preview        first-pass report before judgment is final
   --upload         scan: upload the local files instead of the pushed commit (after the human picks it)
   --confirm-credits scan: the price the human approved for a scan over 4 credits (only after they say yes)

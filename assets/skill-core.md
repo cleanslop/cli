@@ -69,9 +69,13 @@ A finished CLI report with `confirmed` or `needs_input` findings ends with a `fi
 
 A rescan builds on the last scan of the same branch (or of the same uploaded folder) and costs only the files changed since. The CLI prints `Incremental scan building on <scan id>`; the scan shows `incremental` and its `parentScanId`. A full scan prints why (`Full scan: …`). Pass `--full` (MCP: `scan_start` with `mode: "full"`) only when the human asks to rescan everything. When nothing changed since the last scan, the scan stops with `already_scanned` and a CLEANSLOP_QUESTION; nothing is charged. Ask it, and add `--full` only after the human says yes.
 
+## Security scans
+
+`--security` (MCP: `scan_start` with `profile: "security"`) runs a Security scan: a separate scan with its own checks and report, on any plan. Run it only when the human asks for a security scan; "Security scan with cleanslop.com" is that ask. It is always full and costs half a full scan of the repo (1 credit during launch pricing; the price the scan reports is what it costs). It never replaces the readiness scan or its rescans. When its report says `cveReview: "skipped"` (Markdown: `CVE review: skipped`), the packages were not checked: no CVE rows is not a clean result.
+
 ## Scan credits
 
-A scan priced over 4 credits stops with `credits_confirmation_required` and its price, as a CLEANSLOP_QUESTION. Ask the human that question; only after a yes, run the same command again with `--confirm-credits <credits>` added (MCP: `scan_start` with `confirmCredits`). Never pass a price the human did not approve. Nothing is charged until then, and if the scan reads less, the difference comes back.
+A scan priced over 4 credits (Security scans too) stops with `credits_confirmation_required` and its price, as a CLEANSLOP_QUESTION. Ask the human that question; only after a yes, run the same command again with `--confirm-credits <credits>` added (MCP: `scan_start` with `confirmCredits`). Never pass a price the human did not approve. Nothing is charged until then, and if the scan reads less, the difference comes back.
 
 ## Stop conditions
 

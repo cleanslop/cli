@@ -322,6 +322,91 @@ test("--full asks for a full scan; the start says what it builds on or why it is
   }
 });
 
+test("--security starts a Security scan and says so", async () => {
+  const fake = await startFakeServer();
+  cleanups.push(fake.close);
+  const home = tempHome();
+  await connected(fake.origin, home);
+  fake.state.scanStartExtra = {
+    fullScanReason: null,
+    scan: { ...fake.state.scan, profile: "security" },
+  };
+  const started = makeDeps({ origin: fake.origin, home, git: gitStub() });
+  assert.equal(await runCli(["scan", "--security"], started.deps), 0);
+  const body = fake.state.created.at(-1) as { profile?: string; mode?: string };
+  assert.equal(body.profile, "security");
+  assert.equal(body.mode, undefined);
+  assert.match(started.cap.err(), /Security scan: a full scan with its own report\./);
+  assert.doesNotMatch(started.cap.err(), /Full scan:|Incremental scan/);
+
+  fake.state.scanStartExtra = null;
+  const plain = makeDeps({ origin: fake.origin, home, git: gitStub() });
+  assert.equal(await runCli(["scan"], plain.deps), 0);
+  assert.equal((fake.state.created.at(-1) as { profile?: string }).profile, undefined);
+
+  // A server without Security scans (older, or turned off) would run a
+  // readiness scan instead: refused before anything starts.
+  for (const securityScans of [null, false]) {
+    fake.state.securityScans = securityScans;
+    const before = fake.state.created.length;
+    const refused = makeDeps({ origin: fake.origin, home, git: gitStub() });
+    assert.equal(await runCli(["scan", "--security"], refused.deps), 12);
+    assert.match(
+      refused.cap.err(),
+      /Security scans aren't available on .* yet\. Nothing was started or charged\./
+    );
+    assert.equal(fake.state.created.length, before);
+  }
+});
+
+test("scan --upload --security reuses only a Security scan of the same files", async () => {
+  const fake = await startFakeServer((state) => {
+    state.uploads = true;
+  });
+  cleanups.push(fake.close);
+  const home = tempHome();
+  await connected(fake.origin, home);
+  const repo = join(home, "repo");
+  seedPackTree(repo);
+  const { deps, cap } = makeDeps({
+    origin: fake.origin,
+    home,
+    cwd: repo,
+    git: gitStub({ toplevel: repo }),
+    execFile: createDefaultDeps().execFile,
+  });
+  const reply = (profile: string | undefined) => ({
+    status: 200,
+    body: {
+      scan: { ...fake.state.scan, id: `scan_${profile ?? "old"}`, source: "upload", profile },
+      created: false,
+      deduped: true,
+      charged: null,
+    },
+  });
+
+  // The pre-check asks for the Security profile, and a matching scan is reused.
+  fake.state.reuseReply = reply("security");
+  assert.equal(await runCli(["scan", "--security"], deps), 0, cap.err());
+  assert.equal((fake.state.reuses.at(-1) as { profile?: string }).profile, "security");
+  assert.match(cap.err(), /reusing it without uploading/);
+  assert.equal(fake.state.uploaded.length, 0);
+
+  // A readiness scan (or one from a server that names no profile) never stands in for it.
+  for (const profile of ["quality", undefined]) {
+    fake.state.reuseReply = reply(profile);
+    assert.equal(await runCli(["scan", "--security"], deps), 0, cap.err());
+  }
+  assert.equal(fake.state.uploaded.length, 2);
+  assert.equal((fake.state.created.at(-1) as { profile?: string }).profile, "security");
+
+  // And a Security scan never stands in for a readiness scan.
+  fake.state.reuseReply = reply("security");
+  assert.equal(await runCli(["scan"], deps), 0, cap.err());
+  assert.equal((fake.state.reuses.at(-1) as { profile?: string }).profile, undefined);
+  assert.equal(fake.state.uploaded.length, 3);
+});
+
 test("402 out_of_scans exits 11 with ACTION_REQUIRED top-up", async () => {
   const fake = await startFakeServer((state) => {
     state.scanError = {

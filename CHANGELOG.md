@@ -4,6 +4,15 @@
 release workflow drafts the GitHub release from the section for the version it
 stages; a version with no section gets a draft with only the npm link. -->
 
+## 0.2.1
+
+- `cleanslop scan --security` starts a Security scan on any plan: a separate scan with its own checks and report. It is always full, costs half a full scan of the repo, and asks before charging over 4 credits like any scan. It prints `Security scan: a full scan with its own report.` Works for GitHub repos and uploads.
+- `--security` checks first that the server runs Security scans, and stops without starting or charging anything when it doesn't (exit 12), instead of running a readiness scan.
+- `--upload --security` reuses an earlier scan of the same files only when it was a Security scan, and a plain upload never reuses a Security scan.
+- `--json` scans include `profile` (`quality` or `security`) when the server sends it.
+- Claude Code skill: run a Security scan only when the human asks for one ("Security scan with cleanslop.com" is that ask). It costs 1 credit during launch pricing.
+- `login --link` no longer sends the Terms date it was built with when you agree to the terms. The server records its own current Terms version.
+
 ## 0.2.0
 
 - Scans now cost scan credits: 4 credits per scan, and every balance, plan allowance and pack is shown ×4 (a 5-scan pack is 20 credits). Nothing costs more than before.

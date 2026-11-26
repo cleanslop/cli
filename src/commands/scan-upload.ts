@@ -34,7 +34,7 @@ export async function runUploadScan(
   const manifest = packManifest(plan, archive);
   const reused = args.force
     ? null
-    : await reuseScannedFiles(deps, origin, creds.token, manifest);
+    : await reuseScannedFiles(deps, origin, creds.token, manifest, args.security);
   const started =
     reused ?? (await uploadAndStart(deps, args, origin, creds.token, archive.bytes, manifest));
   requireOk(started);
@@ -86,22 +86,26 @@ export async function runUploadScan(
 }
 
 /**
- * Asks whether these exact files were scanned in the last 24h or are
- * scanning now. Returns that start response, or null to upload them.
- * Servers without the pre-check answer non-2xx, which also means upload.
+ * Asks whether these exact files were scanned in the last 24h (or are
+ * scanning now) with the same profile. Returns that start response, or null
+ * to upload them. Servers without the pre-check answer non-2xx, which also
+ * means upload, and a scan of the other profile is never reused.
  */
 async function reuseScannedFiles(
   deps: CliDeps,
   origin: string,
   token: string,
-  manifest: Record<string, unknown>
+  manifest: Record<string, unknown>,
+  security: boolean
 ): Promise<HttpResult | null> {
   const res = await httpRequest(deps, origin, "POST", "/api/agent/v1/uploads/reuse", {
     token,
-    body: { manifest, surface: "cli" },
+    body: { manifest, profile: security ? "security" : undefined, surface: "cli" },
   });
-  const scanId = (res.json as { scan?: { id?: unknown } | null } | null)?.scan?.id;
+  const scan = (res.json as { scan?: { id?: unknown; profile?: unknown } | null } | null)?.scan;
+  const scanId = scan?.id;
   if (res.status !== 200 || typeof scanId !== "string") return null;
+  if ((scan?.profile === "security") !== security) return null;
   deps.io.stderr(`Same files as scan ${scanId}; reusing it without uploading.\n`);
   return res;
 }
@@ -133,6 +137,7 @@ async function uploadAndStart(
     force: args.force || undefined,
     confirmCredits: args.confirmCredits ?? undefined,
     mode: args.full ? "full" : undefined,
+    profile: args.security ? "security" : undefined,
     surface: "cli",
   };
   const postStart = () =>

@@ -93,6 +93,10 @@ export function writeScanMode(
   started: { created?: boolean; scan: AgentScan; fullScanReason?: string | null }
 ): void {
   if (started.created !== true) return;
+  if (started.scan.profile === "security") {
+    deps.io.stderr("Security scan: a full scan with its own report.\n");
+    return;
+  }
   if (started.scan.incremental && started.scan.parentScanId) {
     deps.io.stderr(`Incremental scan building on ${started.scan.parentScanId}.\n`);
     return;

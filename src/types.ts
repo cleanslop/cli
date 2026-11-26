@@ -30,6 +30,8 @@ export type ParsedArgs = {
   force: boolean;
   /** scan: rescan everything instead of building on the last scan. */
   full: boolean;
+  /** scan: a Security scan (its own report and price). */
+  security: boolean;
   upload: boolean;
   preview: boolean;
   format: ReportFormat;
@@ -77,6 +79,8 @@ export type AgentScan = {
   findingCount?: number;
   /** Builds on `parentScanId` and is priced on what changed since it. */
   incremental?: boolean;
+  /** "security" for a Security scan. Older servers omit it. */
+  profile?: "quality" | "security";
   parentScanId?: string | null;
   elapsedSec?: number;
   eta?: { minSec: number; maxSec: number } | null;
@@ -142,6 +146,8 @@ export type MeResponse = {
   webBilling?: { url?: string; emailMasked?: string } | null;
   /** Link grant that can start a monthly plan with `cleanslop plan`. */
   linkPlans?: boolean;
+  /** Server 2026-11+: Security scans (`--security`) can start here. */
+  securityScans?: boolean;
 };
 
 export type DeviceStartResponse = {

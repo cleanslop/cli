@@ -844,7 +844,7 @@ test("login --link TTY terms consent asks once, then signs up with consentSource
   // First attempt without terms, then a fresh one with them.
   const second = fake.state.linkStarts[1] as { body?: { consentSource?: string; acceptTerms?: string } };
   assert.equal(second.body?.consentSource, "tty");
-  assert.ok(second.body?.acceptTerms);
+  assert.equal(second.body?.acceptTerms, "current");
 });
 
 test("login --link account_exists exits 10 with link_existing", async () => {

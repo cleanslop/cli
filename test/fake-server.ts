@@ -61,6 +61,8 @@ export type FakeState = {
   /** GET /me `creditBalance` (credits-aware servers); omitted when null. */
   meCreditBalance: Record<string, unknown> | null;
   linkPlans: boolean;
+  /** GET /me `securityScans` (Security-aware servers); omitted when null. */
+  securityScans: boolean | null;
   /** Query strings of report GETs. */
   reportQueries: string[];
   /** POST /billing/sign-in-link count, and the reply (null = sent when webBilling is set, else 404). */
@@ -201,6 +203,7 @@ export async function startFakeServer(
     meQuota: { plan: "free", remaining: 3 },
     meCreditBalance: null,
     linkPlans: false,
+    securityScans: true,
     reportQueries: [],
     billingLinkPosts: 0,
     billingLinkReply: null,
@@ -320,6 +323,7 @@ export async function startFakeServer(
           quota: state.meQuota,
           ...(state.meCreditBalance ? { creditBalance: state.meCreditBalance } : {}),
           ...(state.linkPlans ? { linkPlans: true } : {}),
+          ...(state.securityScans == null ? {} : { securityScans: state.securityScans }),
           uploads: state.uploads,
           uploadFallback: state.uploadFallback,
           link: { verified: state.uploads, emailMasked: state.emailMasked },

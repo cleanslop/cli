@@ -10,6 +10,10 @@ Readiness scans from your coding agent. The CLI starts a [CleanSlop](https://cle
 - Agent guide (Markdown): <https://cleanslop.com/agents.md>
 - Prefer MCP? Install the remote server: <https://cleanslop.com/mcp>
 
+## New in 0.2.1
+
+- **Security scans.** `cleanslop scan --security` runs a Security scan on any plan: its own checks and report, always full, at half a full scan's price.
+
 ## New in 0.2.0
 
 - **Rescans check only what changed.** `cleanslop scan` builds on the last scan of the same branch, or of the same uploaded folder, and costs only the files changed since. It prints which scan it built on, or why it ran a full scan. `--full` scans everything again; when nothing changed, it asks before doing that.
@@ -32,7 +36,7 @@ Requires Node 22 or later (Node 20 is end-of-life; npm warns there). **Zero runt
 
 | Command | Purpose |
 |---|---|
-| `scan` (default) | Resolve the github.com origin + HEAD and start a scan. It builds on the last scan of the branch (or of the uploaded folder) and costs only the files changed since. `--wait` waits for the report; `--full` scans everything again; `--upload` scans the local files instead of the pushed commit (after the human picks it); `--confirm-credits <credits>` approves a price over 4 credits, only after the human says yes; `--force` skips the same-commit dedupe |
+| `scan` (default) | Resolve the github.com origin + HEAD and start a scan. It builds on the last scan of the branch (or of the uploaded folder) and costs only the files changed since. `--wait` waits for the report; `--full` scans everything again; `--security` runs a Security scan instead (any plan, its own report, half a full scan); `--upload` scans the local files instead of the pushed commit (after the human picks it); `--confirm-credits <credits>` approves a price over 4 credits, only after the human says yes; `--force` skips the same-commit dedupe |
 | `login [--link [--agree]] [--no-wait \| --resume]` | RFC 8628 device flow. Prints `verification_uri_complete` and `user_code`. `--no-wait` stores the device code; `--resume` finishes it. `--link` signs up or signs in with Stripe Link through `link-cli` instead of GitHub; pass `--agree` only after the human says yes to the quoted terms question. Never prints the token. |
 | `logout [--all]` | Revoke server-side, delete this origin's credentials, and drop its pending GitHub login and Link payment. `--all` revokes every saved origin's token and deletes all local CleanSlop data (Link's own session and `~/.link-cli` files stay; `link-cli auth logout` clears the session) |
 | `whoami` | Connected `@login`, token last4, plan with its monthly credits, and credits remaining (with what a scan costs). `--json` adds `creditBalance` |
